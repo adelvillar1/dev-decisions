@@ -214,6 +214,24 @@ def effective_diff(repo: Path, max_chars: int = DEFAULT_MAX_DIFF_CHARS) -> str:
     return last_commit_diff(repo, max_chars)
 
 
+def diff_content_text(diff: str) -> str:
+    """Extract content lines from a git diff, stripping git metadata."""
+    lines = []
+    for line in diff.splitlines():
+        # Skip git metadata/plumbing lines
+        if line.startswith(("diff --git", "index ", "--- ", "+++ ", "@@", "\\ No newline at end of file")):
+            continue
+        # Skip pure content markers but keep the actual content
+        if line.startswith("+") and len(line) > 1:
+            lines.append(line[1:])
+        elif line.startswith("-") and len(line) > 1:
+            lines.append(line[1:])
+        elif not line.startswith(("+", "-", " ",)):
+            # Context lines (no prefix in unified diff)
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def repo_name(repo: Path) -> str:
     return repo.resolve().name
 
@@ -595,6 +613,56 @@ print(json.dumps(results))
     return out
 
 
+def _call_local_pii_scan(diff: str, cfg: dict) -> dict:
+    """
+    Run local GLiNER2 PII span extraction via the existing venv.
+    Takes a raw git diff, strips git metadata, and scans content text.
+    Returns {entity_type: [text, ...]} or raises on failure.
+    """
+    venv_python = Path(cfg["providers"].get("local_venv", "/private/tmp/gliner-decide")) / "bin" / "python"
+    if not venv_python.exists():
+        raise RuntimeError(f"Local GLiNER venv not found at {venv_python}")
+
+    pii_model = cfg["providers"].get("pii_model", "fastino/gliner2-privacy-filter-PII-multi")
+    pii_labels = cfg.get("scan", {}).get("pii_labels", ["person", "email", "phone", "ssn", "address"])
+
+    # Strip git diff metadata — only scan actual content
+    content = diff_content_text(diff)
+    if not content.strip():
+        return {"entities": {}}
+
+    inline = f'''
+import json, sys, io, contextlib
+from gliner2 import GLiNER2
+
+# Suppress model init banner
+old_stdout = sys.stdout
+sys.stdout = io.StringIO()
+
+model = GLiNER2.from_pretrained({pii_model!r})
+text = sys.argv[1]
+labels = json.loads(sys.argv[2])
+schema = model.create_schema().entities(labels).build()
+result = model.extract(text, schema)
+
+# Restore stdout and print only the JSON result
+sys.stdout = old_stdout
+print(json.dumps(result))
+'''
+
+    proc = subprocess.run(
+        [str(venv_python), "-c", inline, content[: cfg["scan"]["max_diff_chars"]], json.dumps(pii_labels)],
+        capture_output=True, text=True, timeout=cfg["providers"]["request_timeout_seconds"],
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"Local PII scan failed: {proc.stderr[:300]}")
+
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"_raw": proc.stdout[:200]}
+
+
 # ── classify-diff heads ──────────────────────────────────────────────────────
 
 _DIFF_TYPE_LABELS = ["feat", "fix", "refactor", "docs", "test", "chore", "deps", "style"]
@@ -670,6 +738,25 @@ def cmd_scan_staged(args: argparse.Namespace) -> int:
 
     secrets, pii = scan_text(diff, cfg)
 
+    # Deep PII scan with local GLiNER span model (fully local — works on sensitive repos)
+    pii_spans: list[dict] = []
+    if getattr(args, "deep", False):
+        try:
+            pii_result = _call_local_pii_scan(diff, cfg)
+            entities = pii_result.get("entities", {})
+            for entity_type, texts in entities.items():
+                for text in texts:
+                    pii_spans.append({
+                        "type": entity_type,
+                        "text": text,
+                        "source": "gliner2-pii-model",
+                    })
+        except Exception as e:
+            print(f"⚠ Deep PII scan failed: {e}", file=sys.stderr)
+
+    # Merge regex PII + model PII spans for logging/output
+    all_pii = pii + pii_spans
+
     # Log
     log_record({
         "op": "scan-staged",
@@ -678,8 +765,9 @@ def cmd_scan_staged(args: argparse.Namespace) -> int:
         "input_chars": len(diff),
         "input_sha256": hashlib.sha256(diff.encode()).hexdigest()[:16],
         "secrets_found": len(secrets),
-        "pii_found": len(pii),
-        "verdict": "block" if secrets else ("warn" if pii else "pass"),
+        "pii_found": len(all_pii),
+        "pii_spans": len(pii_spans),
+        "verdict": "block" if secrets else ("warn" if all_pii else "pass"),
     })
 
     if secrets:
@@ -696,14 +784,18 @@ def cmd_scan_staged(args: argparse.Namespace) -> int:
             for s in secrets:
                 print(f"  line {s['line']}: [{s['pattern']}] {s['match']}")
 
-    if pii and cfg["scan"]["warn_on_pii"]:
-        print(f"\033[1;33mPII hint — {len(pii)} potential PII hit(s):\033[0m")
+    if all_pii and cfg["scan"]["warn_on_pii"]:
+        print(f"\033[1;33mPII hint — {len(all_pii)} potential PII hit(s):\033[0m")
+        # Show regex hits first
         for p in pii[:5]:
             print(f"  line {p['line']}: [{p['pattern']}] {p['match']}")
-        if len(pii) > 5:
-            print(f"  ... and {len(pii) - 5} more")
+        # Then model spans
+        for span in pii_spans[:5]:
+            print(f"  [model] {span['type']}: {span['text']}")
+        if len(all_pii) > 5:
+            print(f"  ... and {len(all_pii) - 5} more")
 
-    if not secrets and not pii:
+    if not secrets and not all_pii:
         print("✓ No secrets or PII detected in staged changes.")
         return EXIT_OK
 
@@ -1328,6 +1420,8 @@ def build_parser() -> argparse.ArgumentParser:
     # scan-staged
     sp = sub.add_parser("scan-staged", help="Scan staged diff for secrets and PII")
     sp.add_argument("--trigger", default="manual", help="Log this trigger label")
+    sp.add_argument("--deep", action="store_true",
+                    help="Run deep PII scan with local GLiNER span model (fully local, works on sensitive repos)")
     sp.set_defaults(func=cmd_scan_staged)
 
     # classify-diff
