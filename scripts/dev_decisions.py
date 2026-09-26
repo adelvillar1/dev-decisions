@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 # ── constants ────────────────────────────────────────────────────────────────
 
@@ -419,6 +420,116 @@ def _build_local_heads() -> list[dict]:
     ]
 
 
+# ── task registry ──────────────────────────────────────────────────────────────
+# Each task maps to provider-specific head definitions.
+# Heads are built lazily so we don't pay for unused tasks.
+
+def _build_commit_audit_heads() -> dict:
+    """Does the commit message accurately describe the diff?"""
+    return {
+        "decide": [
+            {"task": "How accurately does the commit message describe the diff? accurate = fully describes; partial = partially describes; misleading = contradicts or omits major changes.", "labels": ["accurate", "partial", "misleading"], "multi_label": False},
+            {"task": "Does the commit message mention every major functional change in the diff?", "labels": ["yes", "no"], "multi_label": False},
+        ],
+        "jev": [
+            {"id": "message_accuracy", "type": "choice", "instructions": "How accurately does the commit message describe the diff? accurate = fully describes; partial = partially describes; misleading = contradicts or omits major changes.", "criteria": {"accurate": "Fully describes the diff.", "partial": "Partially describes the diff.", "misleading": "Contradicts or omits major changes."}},
+            {"id": "message_complete", "type": "noul", "instructions": "Does the commit message mention every major functional change in the diff?", "criteria": {"yes": "Yes, all major changes are mentioned.", "no": "No, major changes are missing."}},
+        ],
+        "local": [
+            {"task": "How accurately does the commit message describe the diff? accurate = fully describes; partial = partially describes; misleading = contradicts or omits major changes.", "labels": ["accurate", "partial", "misleading"], "multi_label": False},
+        ],
+    }
+
+
+def _build_deps_risk_heads() -> dict:
+    """Classify dependency update bump level and risk."""
+    return {
+        "decide": [
+            {"task": "What is the semver bump level of this dependency update? patch = bug fix; minor = new feature, backward-compatible; major = breaking change.", "labels": ["patch", "minor", "major"], "multi_label": False},
+            {"task": "What is the risk level? low = patch or minor in low-traffic path; medium = minor in core path or major in low-traffic; high = major in core path or affects auth/data.", "labels": _RISK_LABELS, "multi_label": False},
+            {"task": "Does this dependency update introduce a breaking change?", "labels": _BREAKING_LABELS, "multi_label": False},
+        ],
+        "jev": [
+            {"id": "bump_level", "type": "choice", "instructions": "What is the semver bump level? patch = bug fix; minor = new feature, backward-compatible; major = breaking change.", "criteria": {"patch": "Patch-level bug fix.", "minor": "Minor version, new feature, backward-compatible.", "major": "Major version, breaking change."}},
+            {"id": "risk_tier", "type": "choice", "instructions": "What is the risk level? low = patch or minor in low-traffic path; medium = minor in core path or major in low-traffic; high = major in core path or affects auth/data.", "criteria": {"low": "Low risk.", "medium": "Medium risk.", "high": "High risk."}},
+            {"id": "breaking_change", "type": "noul", "instructions": "Does this dependency update introduce a breaking change?", "criteria": {"yes": "Yes, breaking change.", "no": "No breaking change."}},
+        ],
+        "local": [
+            {"task": "What is the semver bump level of this dependency update? patch = bug fix; minor = new feature, backward-compatible; major = breaking change.", "labels": ["patch", "minor", "major"], "multi_label": False},
+            {"task": "What is the risk level? low = patch or minor in low-traffic path; medium = minor in core path or major in low-traffic; high = major in core path or affects auth/data.", "labels": _RISK_LABELS, "multi_label": False},
+        ],
+    }
+
+
+def _build_docs_drift_heads() -> dict:
+    """Detect docs drift: docs changes without corresponding code changes."""
+    return {
+        "decide": [
+            {"task": "Does this diff include code changes (not just docs)?", "labels": ["code-only", "docs-only", "mixed"], "multi_label": False},
+            {"task": "Is there documentation drift — code changed without corresponding doc updates, or docs updated without code changes?", "labels": ["no-drift", "docs-need-update", "code-needs-docs"], "multi_label": False},
+        ],
+        "jev": [
+            {"id": "change_mix", "type": "choice", "instructions": "Does this diff include code changes (not just docs)?", "criteria": {"code-only": "Only code changes.", "docs-only": "Only documentation changes.", "mixed": "Both code and docs changes."}},
+            {"id": "docs_drift", "type": "noul", "instructions": "Is there documentation drift — code changed without corresponding doc updates, or docs updated without code changes?", "criteria": {"yes": "Yes, docs drift detected.", "no": "No docs drift."}},
+        ],
+        "local": [
+            {"task": "Does this diff include code changes (not just docs)?", "labels": ["code-only", "docs-only", "mixed"], "multi_label": False},
+            {"task": "Is there documentation drift?", "labels": ["no-drift", "drift"], "multi_label": False},
+        ],
+    }
+
+
+def _build_api_drift_heads() -> dict:
+    """Detect API contract drift / breaking changes."""
+    return {
+        "decide": [
+            {"task": "Does this diff modify any public API surface (routes, schemas, exported functions, types, interfaces, RPC methods)?", "labels": ["yes", "no"], "multi_label": False},
+            {"task": "Does this diff introduce a breaking change to the public API?", "labels": _BREAKING_LABELS, "multi_label": False},
+            {"task": "If there is a breaking change, how severe is it? high = requires immediate migration; medium = requires migration but has deprecation path; low = backward-compatible.", "labels": ["high", "medium", "low", "none"], "multi_label": False},
+        ],
+        "jev": [
+            {"id": "public_api_modified", "type": "noul", "instructions": "Does this diff modify any public API surface (routes, schemas, exported functions, types, interfaces, RPC methods)?", "criteria": {"yes": "Yes, public API modified.", "no": "No public API modified."}},
+            {"id": "breaking_change", "type": "noul", "instructions": "Does this diff introduce a breaking change to the public API?", "criteria": {"yes": "Yes, breaking change.", "no": "No breaking change."}},
+            {"id": "severity", "type": "choice", "instructions": "If there is a breaking change, how severe is it?", "criteria": {"high": "High — requires immediate migration.", "medium": "Medium — requires migration but has deprecation path.", "low": "Low — backward-compatible.", "none": "None."}},
+        ],
+        "local": [
+            {"task": "Does this diff modify any public API surface (routes, schemas, exported functions, types, interfaces, RPC methods)?", "labels": ["yes", "no"], "multi_label": False},
+            {"task": "Does this diff introduce a breaking change?", "labels": _BREAKING_LABELS, "multi_label": False},
+        ],
+    }
+
+
+# task name → builder function
+_TASK_BUILDERS: dict[str, Callable[[], dict]] = {
+    "change": lambda: {"decide": _build_decide_heads(), "jev": _build_jev_heads(), "local": _build_local_heads()},
+    "commit_audit": _build_commit_audit_heads,
+    "deps_risk": _build_deps_risk_heads,
+    "docs_drift": _build_docs_drift_heads,
+    "api_drift": _build_api_drift_heads,
+}
+
+
+def get_task_heads(task: str, provider: str) -> list[dict]:
+    """Return provider-specific heads for a named task."""
+    task_def = _TASK_BUILDERS.get(task, _TASK_BUILDERS["change"])()
+    return task_def.get(provider, task_def.get("decide", []))
+
+
+def detect_task_from_diff(diff: str) -> str:
+    """Heuristic task detection from diff content."""
+    diff_lower = diff.lower()
+    # dependency files
+    dep_patterns = ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+                    "requirements.txt", "pyproject.toml", "cargo.toml", "go.mod", "gemfile", "pom.xml"]
+    if any(p in diff_lower for p in dep_patterns):
+        return "deps_risk"
+    # docs-only diff
+    doc_patterns = [".md", ".rst", ".txt", "docs/", "documentation/"]
+    if all(p in diff_lower for p in [".md"]) or "docs/" in diff_lower:
+        return "docs_drift"
+    return "change"
+
+
 def _call_local_provider(diff: str, heads: list[dict], cfg: dict) -> dict:
     """
     Call local GLiNER2 via the existing /private/tmp/gliner-decide venv.
@@ -638,7 +749,8 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
             return EXIT_WARN
 
     provider = args.provider or cfg["classify"]["provider"]
-    heads = _build_decide_heads()
+    task = args.task or detect_task_from_diff(diff)
+    heads = get_task_heads(task, provider.split("+")[0])  # base provider for heads
     results: dict[str, dict] = {}
     providers_used: list[str] = []
     t0 = time.monotonic()
@@ -679,8 +791,8 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         else:
             try:
                 pcfg = cfg["providers"]
-                questions = _build_jev_heads()
-                payload_state = {"diff": diff[:DEFAULT_MAX_DIFF_CHARS]}
+                questions = get_task_heads(task, "jev")
+                payload_state = {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}
                 payload_questions: dict[str, dict] = {}
                 for q in questions:
                     payload_questions[q["id"]] = {
@@ -715,7 +827,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
     # Local GLiNER call — runs in existing /private/tmp/gliner-decide venv
     if provider in ("local", "both"):
         try:
-            local_heads = _build_local_heads()
+            local_heads = get_task_heads(task, "local")
             parsed = _call_local_provider(diff, local_heads, cfg)
             results["local"] = parsed
             providers_used.append("local")
@@ -765,6 +877,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         "op": "classify-diff",
         "repo": repo_name(repo),
         "trigger": args.trigger or "manual",
+        "task": task,
         "provider": provider,
         "providers_used": providers_used,
         "input_chars": len(diff),
@@ -1023,6 +1136,78 @@ def cmd_status(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_fleet_scan(args: argparse.Namespace) -> int:
+    """Run api_drift task across the last commit of every repo under a root."""
+    root = Path(args.root or (Path.home() / "Projects")).expanduser().resolve()
+    repos = _discover_repos(root)
+    if not repos:
+        print(f"No git repos found under {root}")
+        return EXIT_OK
+
+    provider = args.provider or "local"
+    task = "api_drift"
+    print(f"dev-decisions fleet-scan ({task}) — {len(repos)} repos under {root}\n")
+    print(f"  {'repo':<32} {'public_api':<12} {'breaking':<10} {'severity':<10} {'conf':<8}")
+    print(f"  {'─'*32} {'─'*12} {'─'*10} {'─'*10} {'─'*8}")
+
+    escalated_count = 0
+    for repo in repos:
+        try:
+            diff = last_commit_diff(repo, max_chars=8000)
+            if not diff:
+                continue
+            # quick heuristic: only scan repos with code-like files
+            if not any(repo.rglob(f) for f in ("*.py", "*.ts", "*.js", "*.go", "*.rs", "*.java")):
+                continue
+
+            # Build a fake args namespace for classify-diff
+            fake_args = argparse.Namespace(
+                provider=provider,
+                task=task,
+                trigger="fleet-scan",
+                allow_vendor=False,
+            )
+            # We need cfg for the provider, but we can call classify-diff directly
+            # Instead, inline a minimal call to avoid re-running vendor guard
+            cfg = load_config(repo)
+            heads = get_task_heads(task, provider if provider != "both" else "decide")
+
+            # Run the classification inline (simplified)
+            if provider == "local":
+                try:
+                    result = _call_local_provider(diff, heads, cfg)
+                except Exception:
+                    continue
+            elif provider == "decide":
+                continue  # skip vendor in fleet-scan unless explicitly requested
+            else:
+                continue
+
+            # Extract api_drift answers
+            public_api = result.get("Does this diff modify any public API surface (routes, schemas, exported functions, types, interfaces, RPC methods)?", {})
+            breaking = result.get("Does this diff introduce a breaking change to the public API?", {})
+
+            pub_label = public_api.get("label", "?")
+            brk_label = breaking.get("label", "?")
+            sev_label = result.get("If there is a breaking change, how severe is it? high = requires immediate migration; medium = requires migration but has deprecation path; low = backward-compatible.", {}).get("label", "?")
+
+            # confidence from the highest-confidence head
+            confs = [v.get("confidence") for v in result.values() if isinstance(v, dict) and v.get("confidence") is not None]
+            conf_str = f"{max(confs):.2f}" if confs else "—"
+
+            flag = ""
+            if pub_label == "yes" or brk_label == "yes":
+                flag = " ⚠"
+                escalated_count += 1
+
+            print(f"  {repo.name:<32} {pub_label:<12} {brk_label:<10} {sev_label:<10} {conf_str:<8}{flag}")
+        except Exception:
+            continue
+
+    print(f"\n{escalated_count} repos flagged for API drift review")
+    return EXIT_OK
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     log_path = _log_dir() / "events.jsonl"
     if not log_path.exists():
@@ -1149,10 +1334,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("classify-diff", help="Classify staged diff with Decide/Jev")
     sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
                     help="Override config provider (local uses existing /private/tmp/gliner-decide venv)")
+    sp.add_argument("--task", default=None,
+                    help="Task to run: change, commit_audit, deps_risk, docs_drift, api_drift (default: auto-detect from diff)")
     sp.add_argument("--allow-vendor", action="store_true",
                     help="Allow vendor calls even if repo is sensitive")
     sp.add_argument("--trigger", default="manual", help="Log this trigger label")
     sp.set_defaults(func=cmd_classify_diff)
+
+    # fleet-scan
+    sp = sub.add_parser("fleet-scan", help="Scan fleet for API drift across repos")
+    sp.add_argument("--root", default=None, help="Directory to scan (default: ~/Projects)")
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default="local",
+                    help="Provider to use (local recommended for fleet)")
+    sp.add_argument("--task", default="api_drift", help="Task to run (default: api_drift)")
+    sp.set_defaults(func=cmd_fleet_scan)
 
     # zcode-gate
     sp = sub.add_parser("zcode-gate", help="ZCode PreToolUse hook (reads JSON from stdin)")
