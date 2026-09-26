@@ -74,6 +74,9 @@ DEFAULTS: dict = {
         "pre_commit": "scan-staged",
         "pre_push": "classify-diff",
     },
+    "gate": {
+        "advisory_only": True,      # True = warn+proceed; False = block
+    },
 }
 
 
@@ -559,6 +562,24 @@ def _build_issue_triage_heads() -> dict:
     }
 
 
+def _build_safety_heads() -> dict:
+    """Destructive-command safety check."""
+    return {
+        "decide": [
+            {"task": "Does this command perform a destructive operation (force push, rm -rf, DROP/TRUNCATE, destructive migration against production, --no-verify bypass)?", "labels": ["yes", "no"], "multi_label": False},
+            {"task": "If destructive, is it reversible?", "labels": ["yes", "no"], "multi_label": False},
+        ],
+        "jev": [
+            {"id": "destructive", "type": "noul", "instructions": "Does this command perform a destructive operation (force push, rm -rf, DROP/TRUNCATE, destructive migration against production, --no-verify bypass)?", "criteria": {"yes": "Yes, this is destructive.", "no": "Not destructive."}},
+            {"id": "reversible", "type": "noul", "instructions": "If destructive, is it reversible?", "criteria": {"yes": "Yes, reversible.", "no": "No, irreversible."}},
+        ],
+        "local": [
+            {"task": "Does this command perform a destructive operation?", "labels": ["yes", "no"], "multi_label": False},
+            {"task": "If destructive, is it reversible?", "labels": ["yes", "no"], "multi_label": False},
+        ],
+    }
+
+
 # task name → builder function
 _TASK_BUILDERS: dict[str, Callable[[], dict]] = {
     "change": lambda: {"decide": _build_decide_heads(), "jev": _build_jev_heads(), "local": _build_local_heads()},
@@ -568,6 +589,7 @@ _TASK_BUILDERS: dict[str, Callable[[], dict]] = {
     "api_drift": _build_api_drift_heads,
     "pr_gate": _build_pr_gate_heads,
     "issue_triage": _build_issue_triage_heads,
+    "safety": _build_safety_heads,
 }
 
 
@@ -1050,6 +1072,7 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
       { tool_name, command, tool_input, cwd, ... }
 
     Fast-exit on non-git-commit commands. On git commit/push, run scan-staged.
+    Also detects destructive patterns and runs safety task.
     Exit 2 blocks the agent's command.
     """
     try:
@@ -1060,10 +1083,80 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
     tool = payload.get("tool_name", "")
     command = payload.get("tool_input", {}).get("command", "") if isinstance(payload.get("tool_input"), dict) else ""
 
-    # Only gate git commit / push from Bash
+    # Only gate Bash commands
     if tool != "Bash":
         return EXIT_OK
     git_cmd = command.strip()
+    if not git_cmd:
+        return EXIT_OK
+
+    cfg = load_config(None)
+    gate_cfg = cfg.get("gate", {})
+    advisory_only = gate_cfg.get("advisory_only", True)
+
+    # ── destructive-pattern detection ─────────────────────────────────────
+    destructive_patterns = [
+        r"git\s+push\s+.*--force",
+        r"rm\s+-rf\s+",
+        r"DROP\s+TABLE",
+        r"TRUNCATE\s+TABLE",
+        r"--no-verify",
+        r"alembic\s+.*(?:upgrade|downgrade).*head",
+        r"migrate\s+.*(?:up|down).*production",
+        r"rails\s+db:migrate",
+        r"kubectl\s+delete",
+    ]
+    destructive_hits = [p for p in destructive_patterns if re.search(p, git_cmd, re.IGNORECASE)]
+
+    if destructive_hits:
+        print(f"[gate] destructive pattern detected in: {git_cmd}", file=sys.stderr)
+        print(f"[gate] patterns: {', '.join(destructive_hits)}", file=sys.stderr)
+
+        # Regex match is authoritative for destructive flag; model refines reversibility
+        destructive = True
+        reversible = "unknown"
+
+        # Run safety task via local provider (fast, fully local) to check reversibility
+        try:
+            heads = get_task_heads("safety", "local")
+            safety_result = _call_local_provider(git_cmd, heads, cfg)
+            for key, val in safety_result.items():
+                if isinstance(val, dict):
+                    label = val.get("label")
+                    if label:
+                        if "reversible" in key.lower():
+                            reversible = label if isinstance(label, str) else str(label)
+        except Exception as e:
+            print(f"[gate] safety task failed: {e} — reversibility unknown", file=sys.stderr)
+
+        print(f"[gate] safety task: DESTRUCTIVE (reversible={reversible})", file=sys.stderr)
+        reason = f"Destructive operation detected (reversible={reversible})."
+        if advisory_only:
+            print(f"[gate] advisory_only=true — proceeding with warning: {reason}", file=sys.stderr)
+            log_record({
+                "op": "zcode-gate",
+                "tool": tool,
+                "command": git_cmd[:200],
+                "verdict": "advisory_warn",
+                "destructive": True,
+                "reversible": reversible,
+                "advisory_only": True,
+            })
+            return EXIT_WARN
+        else:
+            print(f"[gate] BLOCKED: {reason}", file=sys.stderr)
+            log_record({
+                "op": "zcode-gate",
+                "tool": tool,
+                "command": git_cmd[:200],
+                "verdict": "block",
+                "destructive": True,
+                "reversible": reversible,
+                "advisory_only": False,
+            })
+            return EXIT_BLOCK
+
+    # ── git commit / push gating ──────────────────────────────────────────
     if not re.match(r"git\s+(commit|push)\b", git_cmd):
         return EXIT_OK
 
@@ -1078,6 +1171,7 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
         trigger="zcode-pretooluse",
         provider=None,
         allow_vendor=False,
+        task=None,
     )
     repo = get_repo_root()
     repo_for_log = repo_name(repo) if repo else "unknown"
@@ -1092,7 +1186,7 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
         "repo": repo_for_log,
         "trigger": "zcode-pretooluse",
         "tool": tool,
-        "command": git_cmd[:120],
+        "command": git_cmd[:200],
         "verdict": {EXIT_OK: "pass", EXIT_WARN: "warn", EXIT_BLOCK: "block"}.get(rc, "error"),
         "escalated": rc in (EXIT_WARN, EXIT_BLOCK),
     })
