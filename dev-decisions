@@ -1,0 +1,3 @@
+#!/bin/sh
+# dev-decisions PATH shim — copy to ~/.local/bin/dev-decisions
+exec python3 "$(dirname "$0")/scripts/dev_decisions.py" "$@"

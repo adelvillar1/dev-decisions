@@ -1,0 +1,27 @@
+# dev-decisions config example
+# Copy to ~/.config/dev-decisions/config.toml and edit.
+
+[scan]
+block_on_secret = true
+warn_on_pii = true
+max_diff_chars = 12000
+
+[classify]
+provider = "decide"          # decide | jev | both
+block_on_classification = false
+confidence_floor = 0.7
+escalate_on_null = true
+allow_vendor_on_sensitive = false
+
+[providers]
+decide_api_url = "https://api.fastino.ai/v1/chat/completions"
+decide_model = "fastino/GLiNER-2.5-Decide"
+jev_api_url = "https://api.typesafe.ai/v1/chat/completions"
+jev_model = "jev-1.13.0"
+request_timeout_seconds = 30
+max_retries = 2
+retry_backoff_seconds = 5
+
+[hooks]
+pre_commit = "scan-staged"
+pre_push = "classify-diff"

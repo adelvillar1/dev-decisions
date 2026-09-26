@@ -1,0 +1,3 @@
+#!/bin/sh
+# dev-decisions pre-push hook — managed by dev-decisions install-hooks
+exec "$HOME/.local/bin/dev-decisions" classify-diff --trigger git-pre-push
