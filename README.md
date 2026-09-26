@@ -16,6 +16,8 @@ Three layers, each independently useful:
 
 Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the calibration dataset.
 
+![dev-decisions architecture](docs/architecture.svg)
+
 ## Providers
 
 | Job | Model | Why |
@@ -23,6 +25,32 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the 
 | Diff classification, offline / no API cost | **GLiNER2 local** | Free, private, zero-latency |
 | Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
+
+## Local GLiNER setup
+
+The `local` provider runs GLiNER2 in a standalone uv venv (default `/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive repos. `/private/tmp` is wiped on reboot; move it elsewhere via `providers.local_venv` if you want it to survive.
+
+```bash
+# 1. Create the venv (Python ≤ 3.12 — GLiNER2 needs torch that 3.13/3.14 lack)
+uv venv --python 3.12 /private/tmp/gliner-decide
+
+# 2. Install gliner2 + CPU torch into it
+uv pip install --python /private/tmp/gliner-decide/bin/python "gliner2[local]"
+uv pip install --python /private/tmp/gliner-decide/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python /private/tmp/gliner-decide/bin/python protobuf
+
+# 3. Models download from Hugging Face on first use and are cached:
+#    fastino/GLiNER2.5-Decide                  (classification)
+#    fastino/gliner2-privacy-filter-PII-multi  (scan-staged --deep span extraction)
+```
+
+Point the CLI at a different venv or model in config:
+
+```toml
+[providers]
+local_venv = "/private/tmp/gliner-decide"
+local_model = "fastino/GLiNER2.5-Decide"
+```
 
 ## Task registry
 
@@ -38,6 +66,8 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `pr_gate` | `pr-gate` command | Change type + risk + labels |
 | `issue_triage` | `triage-issues` command | Kind + priority |
 | `safety` | `zcode-gate` destructive patterns | Destructive + reversible |
+
+![v0.2.0 workflows](docs/workflows.svg)
 
 ## Install
 
@@ -80,6 +110,7 @@ dev-decisions classify-diff --provider decide
 dev-decisions classify-diff --provider jev
 dev-decisions classify-diff --provider local
 dev-decisions classify-diff --task deps_risk   # explicit task
+dev-decisions classify-diff --allow-vendor     # one-off vendor call on a sensitive repo
 
 # PR gating (local-first)
 dev-decisions pr-gate [branch] --dry-run
@@ -100,9 +131,21 @@ dev-decisions fleet-scan --root ~/Projects --provider local
 dev-decisions log --tail 20
 dev-decisions log --format json > calibration.jsonl
 
+# Show the effective merged config (defaults ← global ← repo ← env)
+dev-decisions config
+
+# Environment check: python, git, keys, config, hooks, log dir
+dev-decisions doctor
+
 # Remove hooks
 dev-decisions remove-hooks /path/to/repo
 ```
+
+## How a decision flows
+
+`classify-diff`, `scan-staged`, `pr-gate`, and `fleet-scan` share one pipeline: local secret scan first, then guards, then the task registry, then provider routing, then the confidence gate. Every step is appended to the JSONL log.
+
+![decision flow](docs/decision-flow.svg)
 
 ## ZCode agent routing
 
@@ -152,6 +195,57 @@ Matches git hook convention: `0` = proceed, non-zero = stop.
 ## Config precedence
 
 Defaults ← `~/.config/dev-decisions/config.toml` ← `.dev-decisions.toml` (repo) ← `DEV_DECISIONS_*` env vars.
+
+## Config reference
+
+This is the full set of knobs (mirrors [`config.example.toml`](config.example.toml)):
+
+```toml
+[scan]
+block_on_secret = true        # exit 2 on a secret hit
+warn_on_pii = true            # exit 1 on a PII hit (never blocks)
+max_diff_chars = 12000        # truncate diffs before scanning/classifying
+
+[classify]
+provider = "decide"           # decide | jev | local | both
+block_on_classification = false
+confidence_floor = 0.7
+escalate_on_null = true
+allow_vendor_on_sensitive = false
+
+[providers]
+decide_api_url = "https://api.fastino.ai/v1/chat/completions"
+decide_model = "fastino/GLiNER-2.5-Decide"
+jev_api_url = "https://api.typesafe.ai/v1/systemone"   # NOT the chat shape
+jev_model = "jev-1.13.0"
+local_venv = "/private/tmp/gliner-decide"
+local_model = "fastino/GLiNER2.5-Decide"
+request_timeout_seconds = 30
+max_retries = 2
+retry_backoff_seconds = 5
+
+[hooks]
+pre_commit = "scan-staged"
+pre_push = "classify-diff"
+
+[gate]
+advisory_only = true          # true = warn+proceed (exit 1); false = block (exit 2)
+```
+
+Repo-local `.dev-decisions.toml` supports one extra flag: `[repo] sensitive = true` denies all vendor calls for that repo.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `FASTINO_API_KEY not set — skipping Decide` | `export FASTINO_API_KEY=…`, or run with `--provider local` (no key needed) |
+| `Local GLiNER venv not found at …` | Create it (see [Local GLiNER setup](#local-gliner-setup)) or point `providers.local_venv` at an existing one. `/private/tmp` is wiped on reboot |
+| `error: gh CLI required` | `brew install gh && gh auth login` |
+| `Repo is marked sensitive — vendor classification skipped` | Intended. Pass `--allow-vendor` for one call, or set `allow_vendor_on_sensitive = true` |
+| Decide returns `null` on a head | Not an error — the model declined (usually a short/ambiguous diff). Treat as low signal; nulls escalate |
+| Jev calls fail or return unexpected shapes | Jev uses `POST /v1/systemone` with `{state, questions, model}` — not the OpenAI chat shape. Check `providers.jev_api_url` |
+| Commits feel slow on huge diffs | Lower `scan.max_diff_chars` (e.g. 6000); the local regex scan is fast, vendor calls scale with size |
+| Python 3.13/3.14 + local provider | The stdlib CLI runs on any python3 ≥ 3.10, but GLiNER2's torch needs the 3.12 venv (see setup above) |
 
 ## JSONL log schema
 

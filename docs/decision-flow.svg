@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 950" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d97706"/>
+    </marker>
+  </defs>
+
+  <rect width="1240" height="950" fill="#f8fafc"/>
+
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#0f172a">how a decision flows</text>
+  <text x="40" y="78" font-size="14" fill="#475569">classify-diff · scan-staged · pr-gate · fleet-scan share one pipeline — local first, vendor second, everything logged</text>
+
+  <!-- left rail: jsonl -->
+  <rect x="20" y="120" width="52" height="720" rx="12" fill="#fdf2f8" stroke="#f9a8d4" stroke-dasharray="6 4"/>
+  <text transform="rotate(-90 46 480)" x="46" y="480" text-anchor="middle" font-size="12" fill="#db2777">JSONL log — every step appended</text>
+
+  <!-- main column -->
+  <!-- 1 input -->
+  <rect x="150" y="110" width="600" height="64" rx="12" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="450" y="136" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">input diff</text>
+  <text x="450" y="158" text-anchor="middle" font-size="12" fill="#3730a3">staged · PR · last commit · fleet-scan batch</text>
+
+  <line x1="450" y1="174" x2="450" y2="200" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 2 secret scan -->
+  <rect x="150" y="204" width="600" height="64" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="450" y="230" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">1 · secret scan — local regex, deterministic</text>
+  <text x="450" y="252" text-anchor="middle" font-size="12" fill="#64748b">no vendor call · always runs first</text>
+  <line x1="750" y1="236" x2="830" y2="236" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrRed)"/>
+  <rect x="834" y="204" width="376" height="64" rx="12" fill="#fef2f2" stroke="#fca5a5"/>
+  <text x="1022" y="230" text-anchor="middle" font-size="14" font-weight="700" fill="#b91c1c">BLOCK · exit 2</text>
+  <text x="1022" y="252" text-anchor="middle" font-size="12" fill="#991b1b">vendor calls skipped — never leak what we scan for</text>
+
+  <line x1="450" y1="268" x2="450" y2="294" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 3 pii -->
+  <rect x="150" y="298" width="600" height="64" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="450" y="324" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">2 · PII scan — regex, or span model with --deep</text>
+  <text x="450" y="346" text-anchor="middle" font-size="12" fill="#64748b">--deep runs the local GLiNER PII model · safe on sensitive repos</text>
+  <line x1="750" y1="330" x2="830" y2="330" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrAmber)"/>
+  <rect x="834" y="298" width="376" height="64" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="1022" y="324" text-anchor="middle" font-size="14" font-weight="700" fill="#b45309">WARN · exit 1</text>
+  <text x="1022" y="346" text-anchor="middle" font-size="12" fill="#92400e">advisory only — never blocks</text>
+
+  <line x1="450" y1="362" x2="450" y2="388" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 4 sensitive guard -->
+  <rect x="150" y="392" width="600" height="64" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="450" y="418" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">3 · sensitive-repo guard</text>
+  <text x="450" y="440" text-anchor="middle" font-size="12" fill="#64748b">.dev-decisions.toml → [repo] sensitive = true</text>
+  <line x1="750" y1="424" x2="830" y2="424" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="834" y="392" width="376" height="64" rx="12" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="1022" y="418" text-anchor="middle" font-size="14" font-weight="700" fill="#475569">vendor denied</text>
+  <text x="1022" y="440" text-anchor="middle" font-size="12" fill="#64748b">unless --allow-vendor is passed</text>
+
+  <line x1="450" y1="456" x2="450" y2="482" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 5 task selection -->
+  <rect x="150" y="486" width="600" height="74" rx="12" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="450" y="512" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">4 · task selection — task registry</text>
+  <text x="450" y="534" text-anchor="middle" font-size="12" fill="#3730a3">auto: deps files → deps_risk · docs-only → docs_drift · else change</text>
+  <text x="450" y="551" text-anchor="middle" font-size="12" fill="#3730a3">explicit --task overrides · 8 tasks, each with per-provider heads</text>
+
+  <line x1="450" y1="560" x2="450" y2="586" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 6 provider routing -->
+  <rect x="150" y="590" width="600" height="74" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="450" y="616" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">5 · provider routing</text>
+  <g font-size="12" font-weight="600">
+    <rect x="205" y="630" width="120" height="24" rx="12" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="265" y="646" text-anchor="middle" fill="#475569">local GLiNER</text>
+    <rect x="340" y="630" width="100" height="24" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+    <text x="390" y="646" text-anchor="middle" fill="#b45309">Decide</text>
+    <rect x="455" y="630" width="90" height="24" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
+    <text x="500" y="646" text-anchor="middle" fill="#047857">Jev</text>
+    <rect x="560" y="630" width="90" height="24" rx="12" fill="#faf5ff" stroke="#e9d5ff"/>
+    <text x="605" y="646" text-anchor="middle" fill="#7e22ce">both</text>
+  </g>
+
+  <line x1="450" y1="664" x2="450" y2="690" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 7 confidence gate -->
+  <rect x="150" y="694" width="600" height="64" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="450" y="720" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">6 · confidence gate</text>
+  <text x="450" y="742" text-anchor="middle" font-size="12" fill="#64748b">conf ≥ floor (0.7 default) · null / declined verdicts always escalate</text>
+  <line x1="750" y1="726" x2="830" y2="726" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrAmber)"/>
+  <rect x="834" y="694" width="376" height="64" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="1022" y="720" text-anchor="middle" font-size="14" font-weight="700" fill="#b45309">ESCALATE · exit 1</text>
+  <text x="1022" y="742" text-anchor="middle" font-size="12" fill="#92400e">exit 2 only if block_on_classification = true</text>
+
+  <line x1="450" y1="758" x2="450" y2="784" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- pass -->
+  <rect x="150" y="788" width="600" height="52" rx="12" fill="#ecfdf5" stroke="#6ee7b7"/>
+  <text x="450" y="820" text-anchor="middle" font-size="14" font-weight="700" fill="#047857">PASS · exit 0</text>
+
+  <!-- footer -->
+  <rect x="40" y="872" width="1160" height="44" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="620" y="899" text-anchor="middle" font-size="13" fill="#1e40af">advisory-first: nothing blocks except a detected secret — or block_on_classification = true once your thresholds are calibrated</text>
+</svg>
