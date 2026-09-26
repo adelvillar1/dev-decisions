@@ -1615,6 +1615,149 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_changelog(args: argparse.Namespace) -> int:
+    """Generate Keep-a-Changelog markdown from commits since a ref."""
+    since = args.since
+    write = getattr(args, "write", False)
+    provider = getattr(args, "provider", None) or load_config(None)["classify"]["provider"]
+
+    repo = get_repo_root()
+    if not repo:
+        print("error: not in a git repository", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Collect commits since ref
+    try:
+        log_out = subprocess.run(
+            ["git", "log", "--oneline", "--no-merges", f"{since}..HEAD"],
+            cwd=repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"error: git log failed: {e.stderr}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if not log_out:
+        print(f"No commits since {since}.")
+        return EXIT_OK
+
+    commits = []
+    for line in log_out.splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) == 2:
+            commits.append({"sha": parts[0], "subject": parts[1]})
+
+    print(f"Changelog: {len(commits)} commits since {since}\n")
+
+    # Group headers
+    sections = {"Added": [], "Changed": [], "Fixed": [], "Removed": [], "Security": []}
+    cfg = load_config(repo)
+    heads = get_task_heads("change", provider.split("+")[0])
+
+    for c in commits:
+        sha = c["sha"]
+        subject = c["subject"]
+
+        # Get diff for classification
+        try:
+            diff = subprocess.run(
+                ["git", "show", "--stat", "--format=", sha],
+                cwd=repo, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except subprocess.CalledProcessError:
+            diff = ""
+
+        if not diff:
+            sections["Changed"].append(subject)
+            continue
+
+        try:
+            if provider in ("decide", "both"):
+                result = _call_openai_compatible(
+                    cfg["providers"]["decide_api_url"],
+                    _env_key("decide"),
+                    cfg["providers"]["decide_model"],
+                    [
+                        {"role": "system", "content": "You are a changelog classifier. Answer only with the requested labels."},
+                        {"role": "user", "content": f"Classify this commit for a changelog.\n\nSubject: {subject}\n\nDiff:\n{diff}"},
+                    ],
+                    schema={"classifications": heads},
+                    timeout=cfg["providers"]["request_timeout_seconds"],
+                    max_retries=cfg["providers"]["max_retries"],
+                    backoff=cfg["providers"]["retry_backoff_seconds"],
+                )
+                parsed = _parse_decide_response(result)
+            elif provider == "jev":
+                questions = get_task_heads("change", "jev")
+                payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
+                body = json.dumps({"state": {"subject": subject, "diff": diff[:DEFAULT_MAX_DIFF_CHARS]}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
+                resp = _call_jev_raw(body, _env_key("jev"))
+                parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+            else:
+                parsed = _call_local_provider(diff, heads, cfg)
+        except Exception as e:
+            sections["Changed"].append(subject)
+            continue
+
+        # Map diff_type to section
+        diff_type = "change"
+        for key, val in parsed.items():
+            if isinstance(val, dict) and "type" in key.lower():
+                label = val.get("label")
+                if label:
+                    diff_type = label if isinstance(label, str) else str(label)
+                    break
+
+        # Heuristic mapping
+        if diff_type in ("feat", "feature"):
+            sections["Added"].append(subject)
+        elif diff_type in ("fix", "bug"):
+            sections["Fixed"].append(subject)
+        elif diff_type in ("refactor", "perf", "dep", "deps"):
+            sections["Changed"].append(subject)
+        elif diff_type in ("remove", "removed", "del"):
+            sections["Removed"].append(subject)
+        elif diff_type in ("sec", "security"):
+            sections["Security"].append(subject)
+        else:
+            sections["Changed"].append(subject)
+
+    # Render markdown
+    lines = [f"## [{args.next_version or 'Unreleased'}]\n"]
+    for section, items in sections.items():
+        if items:
+            lines.append(f"### {section}\n")
+            for item in items:
+                lines.append(f"- {item}")
+            lines.append("")
+
+    md = "\n".join(lines).strip() + "\n"
+    print(md)
+
+    if write:
+        changelog_path = repo / "CHANGELOG.md"
+        existing = changelog_path.read_text() if changelog_path.exists() else ""
+        # Prepend new section after first heading if present
+        if existing.startswith("#"):
+            first_heading_end = existing.find("\n## ")
+            if first_heading_end != -1:
+                new_content = existing[:first_heading_end] + "\n\n" + md + existing[first_heading_end:]
+            else:
+                new_content = existing + "\n\n" + md
+        else:
+            new_content = md + existing
+        changelog_path.write_text(new_content)
+        print(f"Written to {changelog_path}")
+
+    log_record({
+        "op": "changelog",
+        "since": since,
+        "commits": len(commits),
+        "provider": provider,
+        "write": write,
+    })
+    return EXIT_OK
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     repo = get_repo_root()
     cfg = load_config(repo)
@@ -1742,6 +1885,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Override config provider (local recommended)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them (default)")
     sp.set_defaults(func=cmd_triage_issues)
+
+    # changelog
+    sp = sub.add_parser("changelog", help="Generate Keep-a-Changelog markdown since a ref")
+    sp.add_argument("--since", required=True, help="Git ref (tag/commit) to start from")
+    sp.add_argument("--next-version", default="Unreleased", help="Version header (default: Unreleased)")
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+                    help="Override config provider (local recommended)")
+    sp.add_argument("--write", action="store_true", help="Write/append to CHANGELOG.md")
+    sp.set_defaults(func=cmd_changelog)
 
     # zcode-gate
     sp = sub.add_parser("zcode-gate", help="ZCode PreToolUse hook (reads JSON from stdin)")
