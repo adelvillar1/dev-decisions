@@ -30,7 +30,7 @@ from typing import Callable
 
 # ── constants ────────────────────────────────────────────────────────────────
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONFIG_DIR = Path.home() / ".config" / "dev-decisions"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 LOG_DIR = Path.home() / ".local" / "share" / "dev-decisions" / "logs"

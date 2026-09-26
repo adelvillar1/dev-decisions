@@ -1,11 +1,11 @@
 ---
 name: dev-decisions
-description: Use decision models (Jev, GLiNER-2.5-Decide) to classify diffs, scan commits for secrets/PII, and gate git operations in dev workflows. Use when the user mentions dev-decisions, decision-model gates, pre-commit scans, diff classification, Jev for code review, GLiNER for secrets, decision-model workflows, or decision logging. Triggers on: "scan the staged diff", "classify this commit", "what type of change is this", "install dev-decisions hooks", "decision log", "calibration data for thresholds".
+description: Use decision models (Jev, GLiNER-2.5-Decide) to classify diffs, scan commits for secrets/PII, gate git operations, PRs, and issues in dev workflows. Use when the user mentions dev-decisions, decision-model gates, pre-commit scans, diff classification, Jev for code review, GLiNER for secrets, decision-model workflows, decision logging, PR gating, issue triage, changelog generation, or ZCode agent routing. Triggers on: "scan the staged diff", "classify this commit", "what type of change is this", "install dev-decisions hooks", "decision log", "calibration data for thresholds", "PR gate", "triage issues", "generate changelog", "ZCode gate".
 ---
 
 # dev-decisions: decision-model gates for git + ZCode workflows
 
-A stdlib-only Python CLI (`dev-decisions`) that uses hosted decision models to classify diffs, scan for secrets/PII, and log every decision to JSONL as a calibration set for fitting thresholds later.
+A stdlib-only Python CLI (`dev-decisions`) that uses hosted decision models to classify diffs, scan for secrets/PII, gate PRs/issues, generate changelogs, and log every decision to JSONL as a calibration set for fitting thresholds later.
 
 ## Quick start
 
@@ -15,6 +15,18 @@ dev-decisions status                    # all repos under ~/Projects
 dev-decisions bulk-install              # install hooks in every repo
 dev-decisions bulk-install --force      # overwrite existing hooks
 dev-decisions status --root ~/code      # scan a different root
+
+# PR gating
+dev-decisions pr-gate [branch] --dry-run
+dev-decisions pr-gate 123 --provider local
+
+# Issue triage (dry-run by default)
+dev-decisions triage-issues [owner/repo] --limit 20
+dev-decisions triage-issues --state all --dry-run
+
+# Changelog generation
+dev-decisions changelog --since v0.1.0
+dev-decisions changelog --since v0.1.0 --write
 ```
 
 ## Architecture
@@ -23,8 +35,8 @@ Three layers, each independently useful:
 
 | Layer | What it does | When it runs |
 |---|---|---|
-| **git hooks** | pre-commit → `scan-staged` (block secrets); pre-push → `classify-diff` | Automatic, per-repo |
-| **ZCode hook** | `PreToolUse` on Bash → blocks agent-run `git commit`/`git push` if scan/classify fails | Automatic, global (opt-in) |
+| **git hooks** | `pre-commit` → `scan-staged` (block secrets); `pre-push` → `classify-diff` | Automatic, per-repo |
+| **ZCode hook** | `PreToolUse` on Bash → detects destructive commands, gates `git commit`/`git push` | Automatic, global (opt-in) |
 | **CLI** | All subcommands, invocable from ZCode skill or terminal | On-demand |
 
 Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the calibration dataset.
@@ -48,7 +60,22 @@ Use this when onboarding a new machine, after cloning a batch of repos, or when 
 | Diff classification, offline / no API cost | **GLiNER2 local** (`/private/tmp/gliner-decide`) | Free, private, zero-latency for small diffs |
 | Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
-| Agreement / confidence gating | **both` / `local+decide` / `local+jev` | Capture disagreements for calibration |
+| Agreement / confidence gating | **both** / `local+decide` / `local+jev` | Capture disagreements for calibration |
+
+## Task registry
+
+Every feature is a named task with provider-specific heads. Add new tasks by defining heads — no provider-code changes.
+
+| Task | Auto-detected when | Use |
+|---|---|---|
+| `change` | default | Diff type + risk |
+| `commit_audit` | always | Message accuracy |
+| `deps_risk` | deps files touched | Bump level + breaking |
+| `docs_drift` | docs-only diff | Behavior change + docs updated |
+| `api_drift` | always | Public API + breaking + severity |
+| `pr_gate` | `pr-gate` command | Change type + risk + labels |
+| `issue_triage` | `triage-issues` command | Kind + priority |
+| `safety` | `zcode-gate` destructive patterns | Destructive + reversible |
 
 ## classify-diff heads
 
@@ -68,56 +95,65 @@ Local GLiNER (same heads as Decide, via existing `/private/tmp/gliner-decide` ve
 
 Both providers return confidence. The JEV-as-a-Judge paper's finding applies: **confidence is an escalation signal, not a certificate**. Default floor is 0.7; null/declined verdicts always escalate.
 
-## Safety rules
+## PR gating
 
-1. **Secrets always block** (local, deterministic, no vendor call).
-2. **PII warns only** — never blocks; `git commit --no-verify` documented in output.
-3. **Vendor guard**: local scan runs first; any secret hit → vendor call skipped (don't leak what we're scanning for).
-4. **Sensitive repos**: `.dev-decisions.toml` with `sensitive = true` → vendor calls denied unless `--allow-vendor` is passed.
-5. **Credentials**: env vars only (`FASTINO_API_KEY`, `TYPESAFE_API_KEY`). Never in source, args, logs, or output.
-6. **Max diff chars**: default 12k; configurable per repo.
+`pr-gate` classifies a PR diff and applies labels via `gh pr edit --add-label`. Local-first; dry-run by default.
 
-## Config precedence
+```bash
+dev-decisions pr-gate [branch] --dry-run
+dev-decisions pr-gate 123 --provider local
+```
 
-Defaults ← `~/.config/dev-decisions/config.toml` ← `.dev-decisions.toml` (repo) ← `DEV_DECISIONS_*` env vars.
+Labels applied: `bug`, `feature`, `refactor`, `docs`, `chore`, `test`, `ci` (multi-label).
 
-Key flags:
-- `block_on_classification`: false in v1 (advisory); flip once you have calibration data.
-- `confidence_floor`: 0.7 by default.
-- `max_diff_chars`: 12000 by default.
-- `provider`: `decide` | `jev` | `local` | `both`.
-- `local_venv`: path to the gliner2 venv (default `/private/tmp/gliner-decide`).
-- `local_model`: Hugging Face model id (default `fastino/GLiNER2.5-Decide`).
+## Issue triage
 
-## JSONL schema
+`triage-issues` batch-classifies issues and applies labels. Dry-run by default.
+
+```bash
+dev-decisions triage-issues [owner/repo] --limit 20
+dev-decisions triage-issues --state all --dry-run
+```
+
+Classifications: `kind` (bug/feature/docs/question/chore) + `priority` (low/medium/high/critical).
+
+## Changelog generation
+
+`changelog` collects commits since a ref, classifies each, and groups into Keep-a-Changelog markdown.
+
+```bash
+dev-decisions changelog --since v0.1.0
+dev-decisions changelog --since v0.1.0 --write
+```
+
+Sections: Added, Changed, Fixed, Removed, Security.
+
+## ZCode agent routing
+
+`zcode-gate` reads JSON from stdin (PreToolUse hook). It:
+
+1. Fast-exits on non-Bash commands.
+2. Detects destructive patterns (`git push --force`, `rm -rf`, `DROP TABLE`, etc.).
+3. Runs the `safety` task (local GLiNER) to check reversibility.
+4. With `advisory_only = true` (default): warns but proceeds (exit 1).
+5. With `advisory_only = false`: blocks (exit 2).
+6. On `git commit`/`git push`: runs `scan-staged` / `classify-diff` and returns their exit code.
 
 ```json
 {
-  "ts": "2026-09-26T...",
-  "op": "classify-diff",
-  "repo": "my-project",
-  "trigger": "git-pre-push",
-  "provider": "both",
-  "providers_used": ["decide", "jev"],
-  "input_chars": 1234,
-  "input_sha256": "abc123...",
-  "heads": { "decide": {...}, "jev": {...} },
-  "verdict": "escalated",
-  "escalated": true,
-  "latency_ms": 1234
+  "tool_name": "Bash",
+  "tool_input": { "command": "git push --force origin main" }
 }
 ```
 
-## Calibration loop
+Config in `~/.config/dev-decisions/config.toml`:
 
-After a few weeks, the JSONL log contains (input, model, confidence, human-outcome) pairs. Fit real thresholds from it:
-1. Export log: `dev-decisions log --format json > calibration.jsonl`
-2. For each provider × head, plot confidence vs human-accepted rate.
-3. Set per-provider per-head floor from the curve (the JEV-as-a-Judge paper: thresholds don't transfer — fit locally).
+```toml
+[gate]
+advisory_only = true   # true = warn+proceed; false = block
+```
 
-## ZCode hook
-
-Enable in `~/.zcode/cli/config.json` (backup first):
+Enable in `~/.zcode/cli/config.json`:
 
 ```json
 {
@@ -141,19 +177,81 @@ Enable in `~/.zcode/cli/config.json` (backup first):
 }
 ```
 
-The hook no-ops on non-git Bash commands (regex early-exit ≈ instant).
+## Safety rules
 
-## Phase 2 (not in this build)
+1. **Secrets always block** (local, deterministic, no vendor call).
+2. **PII warns only** — never blocks; `git commit --no-verify` documented in output.
+3. **Vendor guard**: local scan runs first; any secret hit → vendor call skipped (don't leak what we're scanning for).
+4. **Sensitive repos**: `.dev-decisions.toml` with `sensitive = true` → vendor calls denied unless `--allow-vendor` is passed.
+5. **Credentials**: env vars only (`FASTINO_API_KEY`, `TYPESAFE_API_KEY`). Never in source, args, logs, or output.
+6. **Max diff chars**: default 12k; configurable per repo.
+7. **Destructive commands**: regex-detected; `safety` task checks reversibility; `advisory_only` controls warn vs block.
 
-- `install-local`: uv 3.12 venv + `gliner2[local]` PII model for offline span-level scan
-- `triage-issues`: batch issue classification
-- `calibrate`: fit thresholds from JSONL
-- Adapter routing: per-domain adapter on one loaded GLiNER2 base
+## Exit codes
 
-## Gotchas
+| Code | Meaning |
+|---|---|
+| 0 | Pass |
+| 1 | Warn (advisory, human review recommended) |
+| 2 | Block |
+| 3 | Error |
 
-- **Python 3.14**: core CLI is stdlib-only and runs fine; local GLiNER needs ≤3.12 (Phase 2 pins uv Python 3.12).
-- **Decide declines**: `risk: null` is common on short diffs — treat as "not enough signal", not an error.
-- **Jev endpoint**: `POST https://api.typesafe.ai/v1/systemone` with `{ state, questions, model }` — NOT the OpenAI chat shape.
-- **TTESS keys**: two TTESS scripts (`scripts/gather-hosted-shadow.py`, `scripts/eval-hosted-shadow.py`) have hardcoded Fastino keys — rotate them and use env vars.
-- **Jev costs**: $0.042/M input tokens; output is free. The 313-token test call costs ~$0.000013.
+Matches git hook convention: `0` = proceed, non-zero = stop.
+
+## Config precedence
+
+Defaults ← `~/.config/dev-decisions/config.toml` ← `.dev-decisions.toml` (repo) ← `DEV_DECISIONS_*` env vars.
+
+Key flags:
+- `block_on_classification`: false in v1 (advisory); flip once you have calibration data.
+- `confidence_floor`: 0.7 by default.
+- `max_diff_chars`: 12000 by default.
+- `provider`: `decide` | `jev` | `local` | `both`.
+- `local_venv`: path to the gliner2 venv (default `/private/tmp/gliner-decide`).
+- `local_model`: Hugging Face model id (default `fastino/GLiNER2.5-Decide`).
+- `gate.advisory_only`: true = warn+proceed; false = block.
+
+## JSONL schema
+
+```json
+{
+  "ts": "2026-09-26T...",
+  "op": "classify-diff",
+  "repo": "my-project",
+  "trigger": "git-pre-push",
+  "provider": "both",
+  "providers_used": ["decide", "jev"],
+  "input_chars": 1234,
+  "input_sha256": "abc123...",
+  "heads": { "decide": {...}, "jev": {...} },
+  "verdict": "escalated",
+  "escalated": true,
+  "latency_ms": 1234,
+  "task": "deps_risk",
+  "labels": ["bug", "feature"],
+  "destructive": true,
+  "reversible": "no",
+  "advisory_only": true
+}
+```
+
+New fields in v0.2.0: `task`, `labels`, `destructive`, `reversible`, `advisory_only`.
+
+## Calibration loop
+
+After a few weeks, the JSONL log contains (input, model, confidence, human-outcome) pairs. Fit real thresholds from it:
+1. Export log: `dev-decisions log --format json > calibration.jsonl`
+2. For each provider × head, plot confidence vs human-accepted rate.
+3. Set per-provider per-head floor from the curve (the JEV-as-a-Judge paper: thresholds don't transfer — fit locally).
+
+## Requirements
+
+- Python 3.10+ (stdlib-only core)
+- git
+- `gh` CLI (for PR gating and issue triage)
+- For hosted providers: `FASTINO_API_KEY` and/or `TYPESAFE_API_KEY` env vars
+- For local provider: `gliner2` installed in a compatible venv
+
+## License
+
+Apache-2.0

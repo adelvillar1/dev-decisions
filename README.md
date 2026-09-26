@@ -2,6 +2,8 @@
 
 Decision-model gates for git + ZCode workflows. Scans secrets/PII from commits, classifies diffs using multiple providers, and logs every decision to JSONL for calibration.
 
+**v0.2.0** — PR gating, issue triage, changelog generation, ZCode agent routing with destructive-command detection.
+
 ## Architecture
 
 Three layers, each independently useful:
@@ -21,6 +23,21 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the 
 | Diff classification, offline / no API cost | **GLiNER2 local** | Free, private, zero-latency |
 | Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
+
+## Task registry
+
+Every feature is a named task with provider-specific heads. Add new tasks by defining heads — no provider-code changes.
+
+| Task | Auto-detected when | Use |
+|---|---|---|
+| `change` | default | Diff type + risk |
+| `commit_audit` | always | Message accuracy |
+| `deps_risk` | deps files touched | Bump level + breaking |
+| `docs_drift` | docs-only diff | Behavior change + docs updated |
+| `api_drift` | always | Public API + breaking + severity |
+| `pr_gate` | `pr-gate` command | Change type + risk + labels |
+| `issue_triage` | `triage-issues` command | Kind + priority |
+| `safety` | `zcode-gate` destructive patterns | Destructive + reversible |
 
 ## Install
 
@@ -56,11 +73,28 @@ dev-decisions status
 
 # Scan staged diff for secrets/PII
 dev-decisions scan-staged
+dev-decisions scan-staged --deep   # PII span model (fully local)
 
 # Classify a diff (choose provider)
 dev-decisions classify-diff --provider decide
 dev-decisions classify-diff --provider jev
 dev-decisions classify-diff --provider local
+dev-decisions classify-diff --task deps_risk   # explicit task
+
+# PR gating (local-first)
+dev-decisions pr-gate [branch] --dry-run
+dev-decisions pr-gate 123 --provider local
+
+# Issue triage (dry-run by default)
+dev-decisions triage-issues [owner/repo] --limit 20
+dev-decisions triage-issues --state all --dry-run
+
+# Changelog generation
+dev-decisions changelog --since v0.1.0
+dev-decisions changelog --since v0.1.0 --write
+
+# Fleet scan for API drift
+dev-decisions fleet-scan --root ~/Projects --provider local
 
 # View decision log (your calibration dataset)
 dev-decisions log --tail 20
@@ -68,6 +102,31 @@ dev-decisions log --format json > calibration.jsonl
 
 # Remove hooks
 dev-decisions remove-hooks /path/to/repo
+```
+
+## ZCode agent routing
+
+`zcode-gate` reads JSON from stdin (PreToolUse hook). It:
+
+1. Fast-exits on non-Bash commands.
+2. Detects destructive patterns (`git push --force`, `rm -rf`, `DROP TABLE`, etc.).
+3. Runs the `safety` task (local GLiNER) to check reversibility.
+4. With `advisory_only = true` (default): warns but proceeds (exit 1).
+5. With `advisory_only = false`: blocks (exit 2).
+6. On `git commit`/`git push`: runs `scan-staged` / `classify-diff` and returns their exit code.
+
+```json
+{
+  "tool_name": "Bash",
+  "tool_input": { "command": "git push --force origin main" }
+}
+```
+
+Config in `~/.config/dev-decisions/config.toml`:
+
+```toml
+[gate]
+advisory_only = true   # true = warn+proceed; false = block
 ```
 
 ## Safety rules
@@ -109,9 +168,16 @@ Defaults ← `~/.config/dev-decisions/config.toml` ← `.dev-decisions.toml` (re
   "heads": { "decide": {...}, "jev": {...} },
   "verdict": "escalated",
   "escalated": true,
-  "latency_ms": 1234
+  "latency_ms": 1234,
+  "task": "deps_risk",
+  "labels": ["bug", "feature"],
+  "destructive": true,
+  "reversible": "no",
+  "advisory_only": true
 }
 ```
+
+New fields in v0.2.0: `task`, `labels`, `destructive`, `reversible`, `advisory_only`.
 
 ## Calibration loop
 
