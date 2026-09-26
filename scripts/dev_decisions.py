@@ -517,6 +517,48 @@ def _build_api_drift_heads() -> dict:
     }
 
 
+def _build_pr_gate_heads() -> dict:
+    """PR quality gate: change type, risk, suggested labels."""
+    _PR_LABELS = ["bug", "feature", "refactor", "docs", "chore", "test", "ci"]
+    return {
+        "decide": [
+            {"task": "What type of change is this PR? Choose the best fit.", "labels": _DIFF_TYPE_LABELS, "multi_label": False},
+            {"task": "What is the risk level? low = safe; medium = behavior change; high = public API, data, auth, or invariant change.", "labels": _RISK_LABELS, "multi_label": False},
+            {"task": "Which labels should be applied? Pick all that apply.", "labels": _PR_LABELS, "multi_label": True},
+        ],
+        "jev": [
+            {"id": "diff_type", "type": "choice", "instructions": "What type of change is this PR?", "criteria": {l: f"A {l} change." for l in _DIFF_TYPE_LABELS}},
+            {"id": "risk_tier", "type": "choice", "instructions": "What is the risk level?", "criteria": {l: f"Risk level {l}." for l in _RISK_LABELS}},
+            {"id": "suggested_labels", "type": "choice", "instructions": "Which labels should be applied?", "criteria": {l: f"Apply {l} label." for l in _PR_LABELS}},
+        ],
+        "local": [
+            {"task": "What type of change is this PR?", "labels": _DIFF_TYPE_LABELS, "multi_label": False},
+            {"task": "What is the risk level?", "labels": _RISK_LABELS, "multi_label": False},
+            {"task": "Which labels should be applied?", "labels": _PR_LABELS, "multi_label": True},
+        ],
+    }
+
+
+def _build_issue_triage_heads() -> dict:
+    """Issue triage: kind and priority."""
+    _ISSUE_KINDS = ["bug", "feature", "docs", "question", "chore"]
+    _ISSUE_PRIORITIES = ["low", "medium", "high", "critical"]
+    return {
+        "decide": [
+            {"task": "What kind of issue is this?", "labels": _ISSUE_KINDS, "multi_label": False},
+            {"task": "What priority should this issue have?", "labels": _ISSUE_PRIORITIES, "multi_label": False},
+        ],
+        "jev": [
+            {"id": "kind", "type": "choice", "instructions": "What kind of issue is this?", "criteria": {k: f"This is a {k}." for k in _ISSUE_KINDS}},
+            {"id": "priority", "type": "choice", "instructions": "What priority should this issue have?", "criteria": {p: f"Priority is {p}." for p in _ISSUE_PRIORITIES}},
+        ],
+        "local": [
+            {"task": "What kind of issue is this?", "labels": _ISSUE_KINDS, "multi_label": False},
+            {"task": "What priority should this issue have?", "labels": _ISSUE_PRIORITIES, "multi_label": False},
+        ],
+    }
+
+
 # task name → builder function
 _TASK_BUILDERS: dict[str, Callable[[], dict]] = {
     "change": lambda: {"decide": _build_decide_heads(), "jev": _build_jev_heads(), "local": _build_local_heads()},
@@ -524,6 +566,8 @@ _TASK_BUILDERS: dict[str, Callable[[], dict]] = {
     "deps_risk": _build_deps_risk_heads,
     "docs_drift": _build_docs_drift_heads,
     "api_drift": _build_api_drift_heads,
+    "pr_gate": _build_pr_gate_heads,
+    "issue_triage": _build_issue_triage_heads,
 }
 
 
@@ -1333,6 +1377,244 @@ def cmd_log(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ── GitHub layer ──────────────────────────────────────────────────────────────
+
+def _call_gh(args: list[str], check: bool = True) -> str:
+    """Thin wrapper around gh CLI. Returns stdout on success, raises on failure."""
+    if shutil.which("gh") is None:
+        raise RuntimeError("gh CLI not found — install https://cli.github.com/")
+    try:
+        r = subprocess.run(
+            ["gh"] + args,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=120,
+        )
+        return r.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"gh failed: {e.stderr.strip() or e}") from e
+
+
+def _gh_pr_number_for_branch(branch: str) -> str:
+    """Resolve PR number for a branch (or current branch if None)."""
+    args = ["pr", "view", "--json", "number", "-q", ".number"]
+    if branch:
+        args += ["--head", branch]
+    out = _call_gh(args)
+    if not out:
+        raise RuntimeError(f"No open PR found for branch {branch or 'current'}.")
+    return out
+
+
+def cmd_pr_gate(args: argparse.Namespace) -> int:
+    """Classify PR diff and apply labels via gh."""
+    branch = getattr(args, "branch", None)
+    dry_run = getattr(args, "dry_run", False)
+
+    if not shutil.which("gh"):
+        print("error: gh CLI required (https://cli.github.com/)", file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        pr_num = _gh_pr_number_for_branch(branch)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+
+    # Fetch PR diff
+    try:
+        diff = _call_gh(["pr", "diff", pr_num])
+    except RuntimeError as e:
+        print(f"error: failed to fetch PR #{pr_num} diff: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if not diff:
+        print(f"PR #{pr_num} has no diff.")
+        return EXIT_OK
+
+    # Classify with pr_gate task
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+    task = "pr_gate"
+    heads = get_task_heads(task, provider.split("+")[0])
+
+    try:
+        if provider in ("decide", "both"):
+            result = _call_openai_compatible(
+                cfg["providers"]["decide_api_url"],
+                _env_key("decide"),
+                cfg["providers"]["decide_model"],
+                [
+                    {"role": "system", "content": "You are a PR classifier. Answer only with the requested labels."},
+                    {"role": "user", "content": f"Review this PR diff and classify it.\n\nDiff:\n{diff}"},
+                ],
+                schema={"classifications": heads},
+                timeout=cfg["providers"]["request_timeout_seconds"],
+                max_retries=cfg["providers"]["max_retries"],
+                backoff=cfg["providers"]["retry_backoff_seconds"],
+            )
+            parsed = _parse_decide_response(result)
+        elif provider == "jev":
+            questions = get_task_heads(task, "jev")
+            payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
+            body = json.dumps({"state": {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
+            resp = _call_jev_raw(body, _env_key("jev"))
+            parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+        else:
+            parsed = _call_local_provider(diff, heads, cfg)
+    except Exception as e:
+        print(f"error: classification failed: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Extract labels (multi-label support)
+    labels_to_apply: list[str] = []
+    for key, val in parsed.items():
+        if isinstance(val, dict):
+            label = val.get("label")
+            if label:
+                if isinstance(label, list):
+                    labels_to_apply.extend(label)
+                else:
+                    labels_to_apply.append(label)
+
+    # Deduplicate
+    labels_to_apply = sorted(set(labels_to_apply))
+
+    print(f"PR #{pr_num} classification:")
+    print(f"  labels: {', '.join(labels_to_apply) or 'none'}")
+
+    if dry_run:
+        print("  (dry-run — labels not applied)")
+        return EXIT_OK
+
+    # Apply labels
+    if labels_to_apply:
+        for label in labels_to_apply:
+            try:
+                _call_gh(["pr", "edit", pr_num, "--add-label", label])
+                print(f"  ✓ applied label: {label}")
+            except RuntimeError as e:
+                print(f"  ✗ failed to apply {label}: {e}", file=sys.stderr)
+
+    log_record({
+        "op": "pr-gate",
+        "pr": pr_num,
+        "task": task,
+        "provider": provider,
+        "labels": labels_to_apply,
+        "dry_run": dry_run,
+    })
+    return EXIT_OK
+
+
+def cmd_triage_issues(args: argparse.Namespace) -> int:
+    """Batch-classify issues and apply labels."""
+    repo = getattr(args, "repo", None)
+    state = getattr(args, "state", "open")
+    limit = getattr(args, "limit", 10)
+    dry_run = getattr(args, "dry_run", True)
+
+    if not shutil.which("gh"):
+        print("error: gh CLI required (https://cli.github.com/)", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+    task = "issue_triage"
+    heads = get_task_heads(task, provider.split("+")[0])
+
+    # Fetch issues
+    gh_args = ["issue", "list", "--state", state, "--limit", str(limit), "--json", "number,title,body,labels"]
+    if repo:
+        gh_args += ["-R", repo]
+    try:
+        issues_json = _call_gh(gh_args)
+    except RuntimeError as e:
+        print(f"error: failed to list issues: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    issues = json.loads(issues_json) if issues_json else []
+    if not issues:
+        print(f"No {state} issues found.")
+        return EXIT_OK
+
+    print(f"Triage: {len(issues)} issues ({state})\n")
+    print(f"  {'#':<6} {'kind':<12} {'priority':<10} {'labels':<30} title")
+    print(f"  {'─'*6} {'─'*12} {'─'*10} {'─'*30} {'─'*40}")
+
+    for issue in issues:
+        num = issue["number"]
+        title = issue.get("title", "")
+        body = issue.get("body", "") or ""
+        text = f"{title}\n\n{body}"[:DEFAULT_MAX_DIFF_CHARS]
+
+        try:
+            if provider in ("decide", "both"):
+                result = _call_openai_compatible(
+                    cfg["providers"]["decide_api_url"],
+                    _env_key("decide"),
+                    cfg["providers"]["decide_model"],
+                    [
+                        {"role": "system", "content": "You are an issue triager. Answer only with the requested labels."},
+                        {"role": "user", "content": f"Classify this issue.\n\n{text}"},
+                    ],
+                    schema={"classifications": heads},
+                    timeout=cfg["providers"]["request_timeout_seconds"],
+                    max_retries=cfg["providers"]["max_retries"],
+                    backoff=cfg["providers"]["retry_backoff_seconds"],
+                )
+                parsed = _parse_decide_response(result)
+            elif provider == "jev":
+                questions = get_task_heads(task, "jev")
+                payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
+                body = json.dumps({"state": {"text": text[:DEFAULT_MAX_DIFF_CHARS], "task": task}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
+                resp = _call_jev_raw(body, _env_key("jev"))
+                parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+            else:
+                parsed = _call_local_provider(text, heads, cfg)
+        except Exception as e:
+            print(f"  {num:<6} error: {e}")
+            continue
+
+        kind = ""
+        priority = ""
+        labels_to_apply = []
+        for key, val in parsed.items():
+            if isinstance(val, dict):
+                label = val.get("label")
+                if label:
+                    if isinstance(label, list):
+                        labels_to_apply.extend(label)
+                    else:
+                        labels_to_apply.append(label)
+                    # infer kind/priority from key
+                    if "kind" in key.lower():
+                        kind = label if isinstance(label, str) else str(label)
+                    elif "priority" in key.lower():
+                        priority = label if isinstance(label, str) else str(label)
+
+        labels_to_apply = sorted(set(labels_to_apply))
+        print(f"  {num:<6} {kind:<12} {priority:<10} {', '.join(labels_to_apply):<30} {title[:40]}")
+
+        if not dry_run and labels_to_apply:
+            for label in labels_to_apply:
+                try:
+                    _call_gh(["issue", "edit", str(num), "--add-label", label])
+                except RuntimeError as e:
+                    print(f"    ✗ failed to apply {label}: {e}", file=sys.stderr)
+
+    log_record({
+        "op": "triage-issues",
+        "count": len(issues),
+        "task": task,
+        "provider": provider,
+        "dry_run": dry_run,
+    })
+    return EXIT_OK
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     repo = get_repo_root()
     cfg = load_config(repo)
@@ -1442,6 +1724,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Provider to use (local recommended for fleet)")
     sp.add_argument("--task", default="api_drift", help="Task to run (default: api_drift)")
     sp.set_defaults(func=cmd_fleet_scan)
+
+    # pr-gate
+    sp = sub.add_parser("pr-gate", help="Classify PR diff and apply labels")
+    sp.add_argument("branch", nargs="?", default=None, help="PR branch (default: current branch)")
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+                    help="Override config provider (local recommended)")
+    sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them")
+    sp.set_defaults(func=cmd_pr_gate)
+
+    # triage-issues
+    sp = sub.add_parser("triage-issues", help="Batch-classify issues and apply labels")
+    sp.add_argument("repo", nargs="?", default=None, help="Repo in owner/repo format (default: current)")
+    sp.add_argument("--state", default="open", help="Issue state: open, closed, all")
+    sp.add_argument("--limit", type=int, default=10, help="Max issues to classify")
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+                    help="Override config provider (local recommended)")
+    sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them (default)")
+    sp.set_defaults(func=cmd_triage_issues)
 
     # zcode-gate
     sp = sub.add_parser("zcode-gate", help="ZCode PreToolUse hook (reads JSON from stdin)")
