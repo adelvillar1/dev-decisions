@@ -34,6 +34,285 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+# ── sys1 bootstrap (optional dependency) ─────────────────────────────────────
+# dev-decisions is a single-file stdlib script. When the `sys1` package is
+# importable, classify/parse/gate calls delegate to it so the two stay in
+# lockstep (one canonical provider implementation, one canonical wire shape).
+# When it isn't, the inline providers below keep the tool fully self-contained.
+#
+# Search order:
+#   1. standard Python path (pip install -e / editable / site-packages)
+#   2. $DEV_DECISIONS_SYS1_PATH (a directory that contains the `sys1` package)
+#   3. ~/Projects/sys1/src (the canonical local checkout)
+#   4. ../sys1/src relative to this script (sibling checkout)
+#   5. installed sys1 package's parent directory (already in sys.path)
+def _bootstrap_sys1():
+    try:
+        import sys1  # type: ignore[import-not-found]
+        return sys1
+    except ImportError:
+        pass
+    candidates: list[Path] = []
+    env = os.environ.get("DEV_DECISIONS_SYS1_PATH")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.append(Path.home() / "Projects" / "sys1" / "src")
+    here = Path(__file__).resolve()
+    for parent in here.parents[:4]:
+        candidates.append(parent / "sys1" / "src")
+    for cand in candidates:
+        s = str(cand)
+        if not cand.is_dir():
+            continue
+        if s not in sys.path:
+            sys.path.insert(0, s)
+        try:
+            import sys1  # type: ignore[import-not-found]
+            return sys1
+        except ImportError:
+            # remove and continue — keep sys.path clean on miss
+            try:
+                sys.path.remove(s)
+            except ValueError:
+                pass
+            continue
+    return None
+
+
+sys1 = _bootstrap_sys1()
+
+
+def _sys1_chain(provider: str) -> list[str]:
+    """Map dev-decisions' provider string to a sys1 provider-chain list.
+
+    The `both` alias here includes local GLiNER because dev-decisions has always
+    treated it as part of the `both` fan-out (sys1's own `both` is decide+jev;
+    this is the dev-decisions-specific interpretation).
+    """
+    if provider == "both":
+        return ["decide", "jev", "local"]
+    if provider == "all":
+        return ["decide", "jev", "local", "modernbert"]
+    if "+" in provider:
+        return [p for p in provider.split("+") if p]
+    return [provider]
+
+
+# sys1 registers ModernBERT under id "modernbert"; dev-decisions has always
+# logged it as "modernbert_raw" so the dashboard can filter it from production
+# metrics. The remap keeps both vocabularies intact.
+_SYS1_PROVIDER_REMAP = {"modernbert": "modernbert_raw"}
+
+
+def _sys1_classify(
+    provider: str,
+    task: str,
+    text: str,
+    cfg: dict,
+) -> dict:
+    """
+    Delegate a classify call to sys1 and reshape the result into the
+    dev-decisions CLI vocabulary:
+      - provider IDs remapped (modernbert → modernbert_raw)
+      - the same `results / providers_used / telemetry / escalated / summary`
+        dict shape the inline code path produces.
+    Raises if sys1 isn't importable; callers should fall back to the inline path.
+    """
+    if sys1 is None:
+        raise RuntimeError("sys1 not available")
+    chain = _sys1_chain(provider)
+    result = sys1.classify(chain, task, text, cfg=cfg, log=False)
+    remap = _SYS1_PROVIDER_REMAP
+    answers = {remap.get(p, p): a for p, a in result.answers.items()}
+    telemetry = {remap.get(p, p): t for p, t in result.telemetry.items()}
+    providers_used = [remap.get(p, p) for p in result.providers_used]
+    return {
+        "results": answers,
+        "providers_used": providers_used,
+        "telemetry": telemetry,
+        "escalated": result.escalated,
+        "summary": result.summary,
+        "latency_ms": result.latency_ms,
+        "verdict": result.verdict,
+    }
+
+
+def _sys1_classify_single(provider: str, task: str, text: str, cfg: dict) -> dict:
+    """
+    sys1-backed replacement for the per-provider blocks in cmd_pr_gate /
+    cmd_triage_issues / cmd_changelog, which expect a single `parsed` dict
+    keyed by head id. Returns answers for the first clearing provider, or {}
+    if none answered. Falls back to {} so callers can keep their existing
+    "extract labels from parsed" loop.
+    """
+    if sys1 is None:
+        raise RuntimeError("sys1 not available")
+    # The single-provider commands historically took the base provider (e.g.
+    # "decide" or "jev") and used that one — but `both` used decide+jev+local.
+    # We preserve the original semantics by running the same chain and using
+    # the first provider whose answers are non-empty.
+    chain = _sys1_chain(provider)
+    result = sys1.classify(chain, task, text, cfg=cfg, log=False)
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        answers = result.answers.get(mapped)
+        if answers:
+            return {"provider": mapped, "answers": answers, "telemetry": result.telemetry.get(mapped, {})}
+    return {"provider": chain[0] if chain else "", "answers": {}, "telemetry": {}}
+
+
+def _extract_labels(answers: dict[str, dict], *, prefer_key_substrings: tuple[str, ...] | None = None) -> list[str]:
+    """
+    Take sys1/dev-decisions answers {head_id: {label/score/noul}} and flatten
+    to the set of unique string labels (skipping score/noul values unless they
+    are strings). Used by cmd_pr_gate / cmd_triage_issues / cmd_changelog.
+    """
+    out: list[str] = []
+    for head_id, entry in (answers or {}).items():
+        if head_id.startswith("_"):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if prefer_key_substrings and not any(s.lower() in head_id.lower() for s in prefer_key_substrings):
+            continue
+        label = entry.get("label")
+        if isinstance(label, list):
+            out.extend(str(x) for x in label)
+        elif label is not None:
+            out.append(str(label))
+    return sorted(set(out))
+
+
+def _legacy_classify(provider: str, task: str, diff: str, cfg: dict) -> dict:
+    """
+    Inline provider path, preserved verbatim from pre-migration dev-decisions so
+    the script still runs standalone when sys1 isn't installed.
+    Returns the same shape as _sys1_classify.
+    """
+    heads = get_task_heads(task, provider.split("+")[0])
+    results: dict[str, dict] = {}
+    providers_used: list[str] = []
+    provider_telemetry: dict[str, dict] = {}
+    t0 = time.monotonic()
+
+    if provider in ("decide", "both"):
+        decide_key = _env_key("decide")
+        if not decide_key:
+            print("⚠ FASTINO_API_KEY not set — skipping Decide.", file=sys.stderr)
+        else:
+            try:
+                messages = [
+                    {"role": "system", "content": "You are a precise change classifier. Answer only with the requested labels."},
+                    {"role": "user", "content": f"Review this git diff and classify it.\n\nDiff:\n{diff}"},
+                ]
+                pcfg = cfg["providers"]
+                decide_telemetry: dict = {}
+                resp = _call_openai_compatible(
+                    pcfg["decide_api_url"],
+                    decide_key,
+                    pcfg["decide_model"],
+                    messages,
+                    schema={"classifications": heads},
+                    timeout=pcfg["request_timeout_seconds"],
+                    max_retries=pcfg["max_retries"],
+                    backoff=pcfg["retry_backoff_seconds"],
+                    telemetry=decide_telemetry,
+                )
+                parsed = _parse_decide_response(resp)
+                results["decide"] = parsed
+                providers_used.append("decide")
+                provider_telemetry["decide"] = decide_telemetry
+            except Exception as e:
+                print(f"⚠ Decide call failed: {e}", file=sys.stderr)
+
+    if provider in ("jev", "both"):
+        jev_key = _env_key("jev")
+        if not jev_key:
+            print("⚠ TYPESAFE_API_KEY not set — skipping Jev.", file=sys.stderr)
+        else:
+            try:
+                pcfg = cfg["providers"]
+                questions = get_task_heads(task, "jev")
+                payload_state = {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}
+                payload_questions: dict[str, dict] = {}
+                for q in questions:
+                    payload_questions[q["id"]] = {
+                        "type": q["type"],
+                        "instructions": q["instructions"],
+                        "criteria": q.get("criteria"),
+                    }
+                body = json.dumps({
+                    "state": payload_state,
+                    "questions": payload_questions,
+                    "model": pcfg["jev_model"],
+                })
+                jev_telemetry: dict = {}
+                raw = _call_jev_raw(body, jev_key, cfg, telemetry=jev_telemetry)
+                parsed = _parse_jev_response(raw, [q["id"] for q in questions])
+                results["jev"] = parsed
+                providers_used.append("jev")
+                provider_telemetry["jev"] = jev_telemetry
+            except Exception as e:
+                print(f"⚠ Jev call failed: {e}", file=sys.stderr)
+
+    if provider in ("local", "both"):
+        try:
+            local_heads = get_task_heads(task, "local")
+            local_telemetry: dict = {}
+            parsed = _call_local_provider(diff, local_heads, cfg, telemetry=local_telemetry)
+            results["local"] = parsed
+            providers_used.append("local")
+            provider_telemetry["local"] = local_telemetry
+        except Exception as e:
+            print(f"⚠ Local GLiNER call failed: {e}", file=sys.stderr)
+
+    if provider == "modernbert":
+        try:
+            modernbert_heads = get_task_heads(task, "modernbert")
+            modernbert_telemetry: dict = {}
+            parsed = _call_modernbert_provider(diff, modernbert_heads, cfg, telemetry=modernbert_telemetry)
+            results["modernbert_raw"] = parsed
+            providers_used.append("modernbert_raw")
+            provider_telemetry["modernbert_raw"] = modernbert_telemetry
+        except Exception as e:
+            print(f"⚠ ModernBERT eval failed: {e}", file=sys.stderr)
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    escalated = False
+    summary: list[str] = []
+    for prov, heads_result in results.items():
+        summary.append(f"\n── {prov} ──")
+        for key, entry in heads_result.items():
+            if key.startswith("_"):
+                continue
+            if not isinstance(entry, dict):
+                summary.append(f"  {key}: (declined)")
+                escalated = True
+                continue
+            label = entry.get("label") or entry.get("score") or entry.get("noul") or entry.get("_raw", "?")
+            conf = entry.get("confidence")
+            label_str = str(label)[:60]
+            if conf is not None:
+                summary.append(f"  {key}: {label_str} (conf {conf:.2f})")
+            else:
+                summary.append(f"  {key}: {label_str}")
+            if conf is not None and conf < cfg["classify"]["confidence_floor"]:
+                escalated = True
+            if entry.get("label") is None and entry.get("score") is None and entry.get("noul") is None:
+                escalated = True
+
+    return {
+        "results": results,
+        "providers_used": providers_used,
+        "telemetry": provider_telemetry,
+        "escalated": escalated,
+        "summary": summary,
+        "latency_ms": elapsed_ms,
+        "verdict": "escalate" if escalated else "pass",
+    }
+
+
 # ── constants ────────────────────────────────────────────────────────────────
 
 VERSION = "0.3.0"
@@ -1201,133 +1480,23 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
 
     provider = args.provider or cfg["classify"]["provider"]
     task = args.task or detect_task_from_diff(diff)
-    heads = get_task_heads(task, provider.split("+")[0])  # base provider for heads
-    results: dict[str, dict] = {}
-    providers_used: list[str] = []
-    provider_telemetry: dict[str, dict] = {}
-    t0 = time.monotonic()
 
-    # Decide call
-    if provider in ("decide", "both"):
-        decide_key = _env_key("decide")
-        if not decide_key:
-            print("⚠ FASTINO_API_KEY not set — skipping Decide.", file=sys.stderr)
-        else:
-            try:
-                messages = [
-                    {"role": "system", "content": "You are a precise change classifier. Answer only with the requested labels."},
-                    {"role": "user", "content": f"Review this git diff and classify it.\n\nDiff:\n{diff}"},
-                ]
-                pcfg = cfg["providers"]
-                decide_telemetry: dict = {}
-                resp = _call_openai_compatible(
-                    pcfg["decide_api_url"],
-                    decide_key,
-                    pcfg["decide_model"],
-                    messages,
-                    schema={"classifications": heads},
-                    timeout=pcfg["request_timeout_seconds"],
-                    max_retries=pcfg["max_retries"],
-                    backoff=pcfg["retry_backoff_seconds"],
-                    telemetry=decide_telemetry,
-                )
-                parsed = _parse_decide_response(resp)
-                results["decide"] = parsed
-                providers_used.append("decide")
-                provider_telemetry["decide"] = decide_telemetry
-            except Exception as e:
-                print(f"⚠ Decide call failed: {e}", file=sys.stderr)
+    # ── classify: sys1 library if importable, inline providers otherwise ──
+    if sys1 is not None:
+        outcome = _sys1_classify(provider, task, diff, cfg)
+    else:
+        outcome = _legacy_classify(provider, task, diff, cfg)
 
-    # Jev call — SDK wire shape: POST /v1/systemone with { state, questions, model }
-    if provider in ("jev", "both"):
-        jev_key = _env_key("jev")
-        if not jev_key:
-            print("⚠ TYPESAFE_API_KEY not set — skipping Jev.", file=sys.stderr)
-        else:
-            try:
-                pcfg = cfg["providers"]
-                questions = get_task_heads(task, "jev")
-                payload_state = {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}
-                payload_questions: dict[str, dict] = {}
-                for q in questions:
-                    payload_questions[q["id"]] = {
-                        "type": q["type"],
-                        "instructions": q["instructions"],
-                        "criteria": q.get("criteria"),
-                    }
-
-                body = json.dumps({
-                    "state": payload_state,
-                    "questions": payload_questions,
-                    "model": pcfg["jev_model"],
-                })
-                jev_telemetry: dict = {}
-                raw = _call_jev_raw(body, jev_key, cfg, telemetry=jev_telemetry)
-
-                parsed = _parse_jev_response(raw, [q["id"] for q in questions])
-                results["jev"] = parsed
-                providers_used.append("jev")
-                provider_telemetry["jev"] = jev_telemetry
-            except Exception as e:
-                print(f"⚠ Jev call failed: {e}", file=sys.stderr)
-
-    # Local GLiNER call — runs in existing /private/tmp/gliner-decide venv
-    if provider in ("local", "both"):
-        try:
-            local_heads = get_task_heads(task, "local")
-            local_telemetry: dict = {}
-            parsed = _call_local_provider(diff, local_heads, cfg, telemetry=local_telemetry)
-            results["local"] = parsed
-            providers_used.append("local")
-            provider_telemetry["local"] = local_telemetry
-        except Exception as e:
-            print(f"⚠ Local GLiNER call failed: {e}", file=sys.stderr)
-
-    # ModernBERT eval — raw inference, no fine-tuning, logged separately
-    if provider == "modernbert":
-        try:
-            modernbert_heads = get_task_heads(task, "modernbert")
-            modernbert_telemetry: dict = {}
-            parsed = _call_modernbert_provider(diff, modernbert_heads, cfg, telemetry=modernbert_telemetry)
-            results["modernbert_raw"] = parsed
-            providers_used.append("modernbert_raw")
-            provider_telemetry["modernbert_raw"] = modernbert_telemetry
-        except Exception as e:
-            print(f"⚠ ModernBERT eval failed: {e}", file=sys.stderr)
-
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    results: dict[str, dict] = outcome["results"]
+    providers_used: list[str] = outcome["providers_used"]
+    provider_telemetry: dict[str, dict] = outcome["telemetry"]
+    escalated: bool = outcome["escalated"]
+    gate_summary: list[str] = outcome["summary"]
+    elapsed_ms: int = outcome["latency_ms"]
 
     if not results:
         print("No provider succeeded — diff unclassified.")
         return EXIT_WARN if cfg["classify"]["block_on_classification"] else EXIT_OK
-
-    # ── interpret ────────────────────────────────────────────────────────
-    escalated = False
-    gate_summary: list[str] = []
-
-    for prov, heads_result in results.items():
-        gate_summary.append(f"\n── {prov} ──")
-        for key, entry in heads_result.items():
-            if key.startswith("_"):
-                continue  # skip meta keys like _raw
-            if not isinstance(entry, dict):
-                # null/declined answer from provider
-                gate_summary.append(f"  {key}: (declined)")
-                escalated = True
-                continue
-            label = entry.get("label") or entry.get("score") or entry.get("noul") or entry.get("_raw", "?")
-            conf = entry.get("confidence")
-            label_str = str(label)[:60]
-            if conf is not None:
-                gate_summary.append(f"  {key}: {label_str} (conf {conf:.2f})")
-            else:
-                gate_summary.append(f"  {key}: {label_str}")
-
-            # escalation checks
-            if conf is not None and conf < cfg["classify"]["confidence_floor"]:
-                escalated = True
-            if entry.get("label") is None and entry.get("score") is None and entry.get("noul") is None:
-                escalated = True
 
     print("\n".join(gate_summary))
     if escalated:
@@ -1423,12 +1592,19 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
 
         # Run safety task via local provider (fast, fully local) to check reversibility
         try:
-            heads = get_task_heads("safety", "local")
-            safety_telemetry: dict = {}
-            safety_result = _call_local_provider(git_cmd, heads, cfg, telemetry=safety_telemetry)
+            if sys1 is not None:
+                safety_telemetry: dict = {}
+                safety_result = {}
+                single = _sys1_classify_single("local", "safety", git_cmd, cfg)
+                safety_result = single.get("answers", {})
+                safety_telemetry = single.get("telemetry", {})
+            else:
+                heads = get_task_heads("safety", "local")
+                safety_telemetry = {}
+                safety_result = _call_local_provider(git_cmd, heads, cfg, telemetry=safety_telemetry)
             for key, val in safety_result.items():
                 if isinstance(val, dict):
-                    label = val.get("label")
+                    label = val.get("label") or val.get("noul") or val.get("score")
                     conf = val.get("confidence")
                     if label:
                         if "reversible" in key.lower():
@@ -1718,37 +1894,62 @@ def cmd_fleet_scan(args: argparse.Namespace) -> int:
             # We need cfg for the provider, but we can call classify-diff directly
             # Instead, inline a minimal call to avoid re-running vendor guard
             cfg = load_config(repo)
-            heads = get_task_heads(task, provider if provider != "both" else "decide")
 
-            # Run the classification inline (simplified)
+            # Run classification (sys1 library if present, else inline providers).
             item_telemetry: dict = {}
-            if provider == "local":
-                try:
-                    result = _call_local_provider(diff, heads, cfg, telemetry=item_telemetry)
-                except Exception:
+            if sys1 is not None:
+                if provider == "local" or provider == "modernbert":
+                    single = _sys1_classify_single(provider, task, diff, cfg)
+                    result = single.get("answers", {})
+                    item_telemetry = single.get("telemetry", {})
+                elif provider == "decide":
+                    continue  # vendor skipped in fleet-scan
+                else:
                     continue
-            elif provider == "modernbert":
-                try:
-                    result = _call_modernbert_provider(diff, heads, cfg, telemetry=item_telemetry)
-                except Exception:
-                    continue
-            elif provider == "decide":
-                continue  # skip vendor in fleet-scan unless explicitly requested
             else:
-                continue
+                heads = get_task_heads(task, provider if provider != "both" else "decide")
+                if provider == "local":
+                    try:
+                        result = _call_local_provider(diff, heads, cfg, telemetry=item_telemetry)
+                    except Exception:
+                        continue
+                elif provider == "modernbert":
+                    try:
+                        result = _call_modernbert_provider(diff, heads, cfg, telemetry=item_telemetry)
+                    except Exception:
+                        continue
+                else:
+                    continue
 
-            # Extract api_drift answers (prefix-match to handle task[:40] truncation in providers)
-            public_api = _find_result_by_prefix(result, "Does this diff modify any public API surface")
-            breaking = _find_result_by_prefix(result, "Does this diff introduce a breaking change")
-            sev_prefix = "If there is a breaking change, how severe is it"
-            sev_raw = _find_result_by_prefix(result, sev_prefix)
+            # Look up api_drift answers by head id (sys1) or task prefix (legacy).
+            def _head(*matches: str) -> dict:
+                for k, v in (result or {}).items():
+                    if not isinstance(v, dict):
+                        continue
+                    kl = k.lower()
+                    if any(m.lower() in kl for m in matches):
+                        return v
+                return {}
+            public_api = _head("public_api_modified", "Does this diff modify any public API surface")
+            breaking = _head("breaking_change", "Does this diff introduce a breaking change")
+            sev_raw = _head("severity", "If there is a breaking change, how severe is it")
 
-            pub_label = public_api.get("label", "?")
-            brk_label = breaking.get("label", "?")
-            sev_label = sev_raw.get("label", "?")
+            def _label_of(entry: dict):
+                v = entry.get("label")
+                if v is None:
+                    v = entry.get("noul")
+                if v is None:
+                    v = entry.get("score")
+                if v is None:
+                    return "?"
+                return "yes" if v is True else "no" if v is False else str(v)
+
+            pub_label = _label_of(public_api)
+            brk_label = _label_of(breaking)
+            sev_label = _label_of(sev_raw)
 
             # confidence from the highest-confidence head
-            confs = [v.get("confidence") for v in result.values() if isinstance(v, dict) and v.get("confidence") is not None]
+            confs = [v.get("confidence") for v in (result or {}).values() if isinstance(v, dict) and v.get("confidence") is not None]
             conf_str = f"{max(confs):.2f}" if confs else "—"
 
             flag = ""
@@ -1871,56 +2072,58 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
     # Classify with pr_gate task
     provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
     task = "pr_gate"
-    heads = get_task_heads(task, provider.split("+")[0])
 
     try:
-        if provider in ("decide", "both"):
-            decide_telemetry: dict = {}
-            result = _call_openai_compatible(
-                cfg["providers"]["decide_api_url"],
-                _env_key("decide"),
-                cfg["providers"]["decide_model"],
-                [
-                    {"role": "system", "content": "You are a PR classifier. Answer only with the requested labels."},
-                    {"role": "user", "content": f"Review this PR diff and classify it.\n\nDiff:\n{diff}"},
-                ],
-                schema={"classifications": heads},
-                timeout=cfg["providers"]["request_timeout_seconds"],
-                max_retries=cfg["providers"]["max_retries"],
-                backoff=cfg["providers"]["retry_backoff_seconds"],
-                telemetry=decide_telemetry,
-            )
-            parsed = _parse_decide_response(result)
-        elif provider == "jev":
-            jev_telemetry: dict = {}
-            questions = get_task_heads(task, "jev")
-            payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
-            body = json.dumps({"state": {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
-            resp = _call_jev_raw(body, _env_key("jev"), cfg, telemetry=jev_telemetry)
-            parsed = _parse_jev_response(resp, [q["id"] for q in questions])
-        elif provider == "modernbert":
-            modernbert_telemetry: dict = {}
-            parsed = _call_modernbert_provider(diff, heads, cfg, telemetry=modernbert_telemetry)
+        if sys1 is not None:
+            single = _sys1_classify_single(provider, task, diff, cfg)
+            parsed: dict = single.get("answers", {})
+            item_telemetry: dict = single.get("telemetry", {})
         else:
-            local_telemetry: dict = {}
-            parsed = _call_local_provider(diff, heads, cfg, telemetry=local_telemetry)
+            item_telemetry = {}
+            heads = get_task_heads(task, provider.split("+")[0])
+            if provider in ("decide", "both"):
+                result = _call_openai_compatible(
+                    cfg["providers"]["decide_api_url"],
+                    _env_key("decide"),
+                    cfg["providers"]["decide_model"],
+                    [
+                        {"role": "system", "content": "You are a PR classifier. Answer only with the requested labels."},
+                        {"role": "user", "content": f"Review this PR diff and classify it.\n\nDiff:\n{diff}"},
+                    ],
+                    schema={"classifications": heads},
+                    timeout=cfg["providers"]["request_timeout_seconds"],
+                    max_retries=cfg["providers"]["max_retries"],
+                    backoff=cfg["providers"]["retry_backoff_seconds"],
+                    telemetry=item_telemetry,
+                )
+                parsed = _parse_decide_response(result)
+            elif provider == "jev":
+                questions = get_task_heads(task, "jev")
+                payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
+                body = json.dumps({"state": {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
+                resp = _call_jev_raw(body, _env_key("jev"), cfg, telemetry=item_telemetry)
+                parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+            elif provider == "modernbert":
+                parsed = _call_modernbert_provider(diff, heads, cfg, telemetry=item_telemetry)
+            else:
+                parsed = _call_local_provider(diff, heads, cfg, telemetry=item_telemetry)
     except Exception as e:
         print(f"error: classification failed: {e}", file=sys.stderr)
         return EXIT_ERROR
 
     # Extract labels (multi-label support)
-    labels_to_apply: list[str] = []
-    for key, val in parsed.items():
-        if isinstance(val, dict):
-            label = val.get("label")
-            if label:
-                if isinstance(label, list):
-                    labels_to_apply.extend(label)
-                else:
-                    labels_to_apply.append(label)
-
-    # Deduplicate
-    labels_to_apply = sorted(set(labels_to_apply))
+    labels_to_apply = _extract_labels(parsed) if sys1 is not None else None
+    if labels_to_apply is None:
+        labels_to_apply = []
+        for key, val in parsed.items():
+            if isinstance(val, dict):
+                label = val.get("label")
+                if label:
+                    if isinstance(label, list):
+                        labels_to_apply.extend(label)
+                    else:
+                        labels_to_apply.append(label)
+        labels_to_apply = sorted(set(labels_to_apply))
 
     print(f"PR #{pr_num} classification:")
     print(f"  labels: {', '.join(labels_to_apply) or 'none'}")
@@ -1947,7 +2150,7 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
         "labels": labels_to_apply,
         "dry_run": dry_run,
         "verdict": "pass" if not labels_to_apply else "applied",
-        "telemetry": decide_telemetry if provider in ("decide", "both") else (jev_telemetry if provider == "jev" else (modernbert_telemetry if provider == "modernbert" else local_telemetry)),
+        "telemetry": item_telemetry,
     })
     return EXIT_OK
 
@@ -1966,7 +2169,8 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
     cfg = load_config(None)
     provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
     task = "issue_triage"
-    heads = get_task_heads(task, provider.split("+")[0])
+    if sys1 is None:
+        heads = get_task_heads(task, provider.split("+")[0])
 
     # Fetch issues
     gh_args = ["issue", "list", "--state", state, "--limit", str(limit), "--json", "number,title,body,labels"]
@@ -1996,7 +2200,11 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
 
         item_telemetry: dict = {}
         try:
-            if provider in ("decide", "both"):
+            if sys1 is not None:
+                single = _sys1_classify_single(provider, task, text, cfg)
+                parsed = single.get("answers", {})
+                item_telemetry = single.get("telemetry", {})
+            elif provider in ("decide", "both"):
                 result = _call_openai_compatible(
                     cfg["providers"]["decide_api_url"],
                     _env_key("decide"),
@@ -2043,10 +2251,11 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
                         labels_to_apply.extend(label)
                     else:
                         labels_to_apply.append(label)
-                    # infer kind/priority from key
-                    if "kind" in key.lower():
+                    # infer kind/priority from key (sys1 head IDs are short: kind/priority)
+                    kl = key.lower()
+                    if "kind" in kl:
                         kind = label if isinstance(label, str) else str(label)
-                    elif "priority" in key.lower():
+                    elif "priority" in kl:
                         priority = label if isinstance(label, str) else str(label)
 
         labels_to_apply = sorted(set(labels_to_apply))
@@ -2116,7 +2325,8 @@ def cmd_changelog(args: argparse.Namespace) -> int:
     # Group headers
     sections = {"Added": [], "Changed": [], "Fixed": [], "Removed": [], "Security": []}
     cfg = load_config(repo)
-    heads = get_task_heads("change", provider.split("+")[0])
+    if sys1 is None:
+        heads = get_task_heads("change", provider.split("+")[0])
     last_commit_telemetry: dict = {}
 
     for c in commits:
@@ -2138,7 +2348,11 @@ def cmd_changelog(args: argparse.Namespace) -> int:
 
         commit_telemetry: dict = {}
         try:
-            if provider in ("decide", "both"):
+            if sys1 is not None:
+                single = _sys1_classify_single(provider, "change", diff, cfg)
+                parsed = single.get("answers", {})
+                commit_telemetry = single.get("telemetry", {})
+            elif provider in ("decide", "both"):
                 result = _call_openai_compatible(
                     cfg["providers"]["decide_api_url"],
                     _env_key("decide"),
@@ -2174,7 +2388,7 @@ def cmd_changelog(args: argparse.Namespace) -> int:
             sections["Changed"].append(subject)
             continue
 
-        # Map diff_type to section
+        # Map diff_type to section (sys1 head ID = "diff_type"; legacy = task[:40])
         diff_type = "change"
         for key, val in parsed.items():
             if isinstance(val, dict) and "type" in key.lower():
@@ -2278,6 +2492,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # uv (optional)
     uv_path = shutil.which("uv")
     print(f"uv:     {'found' if uv_path else 'not found'} (optional, for local GLiNER)")
+
+    # sys1 library (preferred provider implementation)
+    if sys1 is not None:
+        try:
+            sys1_path = Path(sys1.__file__).parent
+        except Exception:
+            sys1_path = Path("?")
+        try:
+            sys1_version = sys1.__version__
+        except Exception:
+            sys1_version = "?"
+        print(f"sys1:   v{sys1_version} at {sys1_path}")
+        try:
+            health = sys1.health_report(load_config(repo_root=None))
+            avail = [pid for pid, info in health.items() if info.get("available")]
+            print(f"  providers available: {', '.join(avail) or 'none'}")
+        except Exception as e:
+            print(f"  sys1 health check failed: {e}")
+    else:
+        print("sys1:   not importable — using inline provider code path")
+        print("        (install: pip install -e ~/Projects/sys1, or set DEV_DECISIONS_SYS1_PATH)")
 
     # config
     if CONFIG_FILE.exists():
