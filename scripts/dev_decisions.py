@@ -81,16 +81,45 @@ def _bootstrap_sys1():
 
 sys1 = _bootstrap_sys1()
 
+# --provider choices: dynamic from the sys1 registry, so candidate models
+# (clm, kev, tev1, decide_1b, ...) show up as soon as sys1 registers them —
+# plus the fan-out aliases. Falls back to the four core ids when sys1 isn't
+# installed (self-contained mode).
+_FALLBACK_PROVIDER_IDS = ["decide", "jev", "local", "modernbert"]
+_PROVIDER_ALIASES = ["both", "all", "core", "optin", "candidates"]
+
+
+def _provider_choices() -> list[str]:
+    if sys1 is None:
+        return _FALLBACK_PROVIDER_IDS + ["both"]
+    try:
+        return sorted(sys1.REGISTRY) + _PROVIDER_ALIASES
+    except Exception:
+        return _FALLBACK_PROVIDER_IDS + ["both"]
+
+
+PROVIDER_CHOICES = _provider_choices()
+
 
 def _sys1_chain(provider: str) -> list[str]:
     """Map dev-decisions' provider string to a sys1 provider-chain list.
 
     The `both` alias here includes local GLiNER because dev-decisions has always
     treated it as part of the `both` fan-out (sys1's own `both` is decide+jev;
-    this is the dev-decisions-specific interpretation).
+    this is the dev-decisions-specific interpretation). Set tokens ("all",
+    "core", "optin", "candidates") delegate to sys1.resolve_providers so they
+    track the registry; a single id passes through (sys1's flag gate and
+    availability checks decide whether it actually runs).
     """
     if provider == "both":
         return ["decide", "jev", "local"]
+    if provider in ("all", "core", "optin", "candidates") and sys1 is not None:
+        try:
+            resolved = sys1.resolve_providers(provider)
+            if resolved:
+                return resolved
+        except Exception:
+            pass
     if provider == "all":
         return ["decide", "jev", "local", "modernbert"]
     if "+" in provider:
@@ -3225,7 +3254,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # classify-diff
     sp = sub.add_parser("classify-diff", help="Classify staged diff with Decide/Jev")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider (local uses existing /private/tmp/gliner-decide venv)")
     sp.add_argument("--task", default=None,
                     help="Task to run: change, commit_audit, deps_risk, docs_drift, api_drift (default: auto-detect from diff)")
@@ -3237,7 +3266,7 @@ def build_parser() -> argparse.ArgumentParser:
     # fleet-scan
     sp = sub.add_parser("fleet-scan", help="Scan fleet for API drift across repos")
     sp.add_argument("--root", default=None, help="Directory to scan (default: ~/Projects)")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default="local",
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default="local",
                     help="Provider to use (local recommended for fleet)")
     sp.add_argument("--task", default="api_drift", help="Task to run (default: api_drift)")
     sp.set_defaults(func=cmd_fleet_scan)
@@ -3245,7 +3274,7 @@ def build_parser() -> argparse.ArgumentParser:
     # pr-gate
     sp = sub.add_parser("pr-gate", help="Classify PR diff and apply labels")
     sp.add_argument("branch", nargs="?", default=None, help="PR branch (default: current branch)")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them")
     sp.set_defaults(func=cmd_pr_gate)
@@ -3255,7 +3284,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("repo", nargs="?", default=None, help="Repo in owner/repo format (default: current)")
     sp.add_argument("--state", default="open", help="Issue state: open, closed, all")
     sp.add_argument("--limit", type=int, default=10, help="Max issues to classify")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them (default)")
     sp.set_defaults(func=cmd_triage_issues)
@@ -3264,7 +3293,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("changelog", help="Generate Keep-a-Changelog markdown since a ref")
     sp.add_argument("--since", required=True, help="Git ref (tag/commit) to start from")
     sp.add_argument("--next-version", default="Unreleased", help="Version header (default: Unreleased)")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--write", action="store_true", help="Write/append to CHANGELOG.md")
     sp.set_defaults(func=cmd_changelog)

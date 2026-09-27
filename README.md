@@ -27,6 +27,19 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
 | Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
 
+### Candidate models (opt-in, via sys1 flags)
+
+`--provider` accepts every provider `sys1` registers, including candidate
+models that are wired but disabled by default: **CLM-8B** (`clm`),
+**openjev/JevK5** (`openjev`), **Kev** (`kev`), **Tev1** (`tev1`),
+**Laya** (`laya`), and the GLiNER variants **`decide_1b`** /
+**`decide_multi`**. Turn one on in `~/.config/sys1/config.toml`
+(`providers.enabled = "core,clm"`) or flip it live in the sys1 control
+dashboard (`GET /dashboard` on the sys1 service, port 8400), then point its
+`{id}_api_url` / `{id}_model` / key env at your endpoint. Use `all`, `core`,
+`optin`, or `candidates` as fan-out tokens. `dev-decisions providers`-style
+inspection lives in the sys1 CLI: `sys1 providers --all`, `sys1 doctor`.
+
 ## Local GLiNER setup
 
 The `local` provider runs GLiNER2 in a standalone uv venv (default `/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive repos. `/private/tmp` is wiped on reboot; move it elsewhere via `providers.local_venv` if you want it to survive.
