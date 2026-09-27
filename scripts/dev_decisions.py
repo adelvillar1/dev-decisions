@@ -9,18 +9,24 @@ Stdlib-only (urllib, tomllib, argparse, hashlib, json, os, re, sqlite3, stat,
 subprocess, sys, time, datetime). Runs on any python3 ≥ 3.10.
 
 Optional local GLiNER (Phase 2): uv-managed Python 3.12 venv with gliner2[local].
+Optional ModernBERT eval (experimental): raw inference for calibration data collection.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import http.server
 import json
 import os
 import re
+import shutil
+import socketserver
 import sqlite3
+import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -30,7 +36,7 @@ from typing import Callable
 
 # ── constants ────────────────────────────────────────────────────────────────
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONFIG_DIR = Path.home() / ".config" / "dev-decisions"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 LOG_DIR = Path.home() / ".local" / "share" / "dev-decisions" / "logs"
@@ -66,6 +72,7 @@ DEFAULTS: dict = {
         "jev_model": "jev-1.13.0",
         "local_venv": "/private/tmp/gliner-decide",
         "local_model": "fastino/GLiNER2.5-Decide",
+        "modernbert_model": "answerdotai/ModernBERT-base",
         "request_timeout_seconds": 30,
         "max_retries": 2,
         "retry_backoff_seconds": 5,
@@ -318,10 +325,12 @@ def _call_openai_compatible(
     timeout: int = 30,
     max_retries: int = 2,
     backoff: float = 5.0,
+    telemetry: dict | None = None,
 ) -> dict:
     """
     Call an OpenAI-compatible chat-completions endpoint.
     Returns the parsed JSON response body, or raises on final failure.
+    If `telemetry` dict is provided, populates it with call-level signals.
     """
     body = {
         "model": model,
@@ -338,6 +347,7 @@ def _call_openai_compatible(
     }
 
     last_err = ""
+    t0 = time.monotonic()
     for attempt in range(max_retries + 1):
         try:
             req = urllib.request.Request(
@@ -345,6 +355,7 @@ def _call_openai_compatible(
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode()
+                http_status = resp.status
             parsed = json.loads(raw)
             # surface provider errors
             if "error" in parsed:
@@ -353,6 +364,17 @@ def _call_openai_compatible(
                     time.sleep(backoff * (attempt + 1))
                     continue
                 raise RuntimeError(f"Provider error: {msg}")
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if telemetry is not None:
+                telemetry["http_status"] = http_status
+                telemetry["latency_ms"] = latency_ms
+                telemetry["retries"] = attempt
+                usage = parsed.get("usage") or {}
+                telemetry["token_prompt"] = usage.get("prompt_tokens")
+                telemetry["token_completion"] = usage.get("completion_tokens")
+                telemetry["token_total"] = usage.get("total_tokens")
+                # structured_output_success = we got a parseable body with choices
+                telemetry["structured_ok"] = bool(parsed.get("choices"))
             return parsed
         except urllib.error.HTTPError as e:
             body_text = ""
@@ -364,15 +386,31 @@ def _call_openai_compatible(
             if attempt < max_retries:
                 time.sleep(backoff * (attempt + 1))
             else:
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                if telemetry is not None:
+                    telemetry["http_status"] = e.code
+                    telemetry["latency_ms"] = latency_ms
+                    telemetry["retries"] = attempt
+                    telemetry["structured_ok"] = False
                 raise RuntimeError(last_err) from e
         except Exception as e:
             last_err = str(e)
             if attempt < max_retries:
                 time.sleep(backoff * (attempt + 1))
             else:
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                if telemetry is not None:
+                    telemetry["latency_ms"] = latency_ms
+                    telemetry["retries"] = attempt
+                    telemetry["structured_ok"] = False
                 raise RuntimeError(f"Request failed: {last_err}") from e
 
-    raise RuntimeError(last_err)  # unreachable, satisfies type checker
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    if telemetry is not None:
+        telemetry["latency_ms"] = latency_ms
+        telemetry["retries"] = max_retries
+        telemetry["structured_ok"] = False
+    raise RuntimeError(last_err)
 
 
 def _parse_decide_response(resp: dict) -> dict:
@@ -582,14 +620,37 @@ def _build_safety_heads() -> dict:
 
 # task name → builder function
 _TASK_BUILDERS: dict[str, Callable[[], dict]] = {
-    "change": lambda: {"decide": _build_decide_heads(), "jev": _build_jev_heads(), "local": _build_local_heads()},
-    "commit_audit": _build_commit_audit_heads,
-    "deps_risk": _build_deps_risk_heads,
-    "docs_drift": _build_docs_drift_heads,
-    "api_drift": _build_api_drift_heads,
-    "pr_gate": _build_pr_gate_heads,
-    "issue_triage": _build_issue_triage_heads,
-    "safety": _build_safety_heads,
+    "change": lambda: {
+        "decide": _build_decide_heads(),
+        "jev": _build_jev_heads(),
+        "local": _build_local_heads(),
+        "modernbert": _build_local_heads(),  # eval: same label set, different model
+    },
+    "commit_audit": lambda: {
+        **_build_commit_audit_heads(),
+        "modernbert": _build_commit_audit_heads().get("local", []),
+    },
+    "deps_risk": lambda: {
+        **_build_deps_risk_heads(),
+        "modernbert": _build_deps_risk_heads().get("local", []),
+    },
+    "docs_drift": lambda: {
+        **_build_docs_drift_heads(),
+        "modernbert": _build_docs_drift_heads().get("local", []),
+    },
+    "api_drift": lambda: {
+        **_build_api_drift_heads(),
+        "modernbert": _build_api_drift_heads().get("local", []),
+    },
+    "pr_gate": lambda: {
+        **_build_pr_gate_heads(),
+        "modernbert": _build_pr_gate_heads().get("local", []),
+    },
+    "issue_triage": lambda: {
+        **_build_issue_triage_heads(),
+        "modernbert": _build_issue_triage_heads().get("local", []),
+    },
+    "safety": _build_safety_heads,  # no modernbert: regex-driven, no training data yet
 }
 
 
@@ -614,10 +675,225 @@ def detect_task_from_diff(diff: str) -> str:
     return "change"
 
 
-def _call_local_provider(diff: str, heads: list[dict], cfg: dict) -> dict:
+def _call_jev_raw(body: str, api_key: str | None, cfg: dict, telemetry: dict | None = None) -> dict:
+    """
+    Call Jev /v1/systemone and return the parsed JSON response dict.
+    Retries on transient errors. Raises RuntimeError on failure.
+    If `telemetry` dict is provided, populates it with HTTP-level signals.
+    """
+    if not api_key:
+        raise RuntimeError("TYPESAFE_API_KEY not set")
+
+    url = cfg["providers"]["jev_api_url"]
+    timeout = cfg["providers"]["request_timeout_seconds"]
+    max_retries = cfg["providers"]["max_retries"]
+    backoff = cfg["providers"]["retry_backoff_seconds"]
+
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=body.encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                method="POST",
+            )
+            t0 = time.monotonic()
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw_bytes = resp.read()
+                http_status = resp.status
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if telemetry is not None:
+                telemetry["http_status"] = http_status
+                telemetry["latency_ms"] = latency_ms
+                telemetry["retries"] = attempt
+            try:
+                return json.loads(raw_bytes.decode())
+            except json.JSONDecodeError:
+                if telemetry is not None:
+                    telemetry["structured_ok"] = False
+                raise RuntimeError(f"Jev returned non-JSON: {raw_bytes[:200]}")
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code}: {e.read().decode()[:300]}"
+            if telemetry is not None:
+                telemetry["http_status"] = e.code
+                telemetry["latency_ms"] = int((time.monotonic() - t0) * 1000)
+                telemetry["retries"] = attempt
+                telemetry["structured_ok"] = False
+            if e.code >= 500 and attempt < max_retries:
+                time.sleep(backoff * (attempt + 1))
+                continue
+            raise RuntimeError(f"Jev HTTP error: {last_err}")
+        except Exception as e:
+            last_err = str(e)
+            if telemetry is not None:
+                telemetry["latency_ms"] = int((time.monotonic() - t0) * 1000)
+                telemetry["retries"] = attempt
+                telemetry["structured_ok"] = False
+            if attempt < max_retries:
+                time.sleep(backoff * (attempt + 1))
+                continue
+            raise RuntimeError(f"Jev call failed: {last_err}")
+    if telemetry is not None:
+        telemetry["latency_ms"] = int((time.monotonic() - t0) * 1000)
+        telemetry["retries"] = max_retries
+        telemetry["structured_ok"] = False
+    raise RuntimeError(f"Jev exhausted retries: {last_err}")
+
+
+def _call_modernbert_provider(text: str, heads: list[dict], cfg: dict, telemetry: dict | None = None) -> dict:
+    """
+    Experimental ModernBERT eval provider (no fine-tuning).
+
+    Uses ModernBERT-base as a sentence encoder: encodes the input text once,
+    then scores each candidate label by cosine similarity against the label's
+    standalone embedding. Returns {task_text: {label, confidence, all_scores}}
+    or raises. all_scores is kept for calibration dashboards.
+
+    Results are logged with provider tag 'modernbert_raw' so they can be
+    filtered from production metrics and used to understand what fine-tuning
+    would need to improve.
+    """
+    import math
+
+    venv_python = Path(cfg["providers"].get("local_venv", "/private/tmp/gliner-decide")) / "bin" / "python"
+    if not venv_python.exists():
+        raise RuntimeError(f"Local venv not found at {venv_python}")
+
+    model_name = cfg["providers"].get("modernbert_model", "answerdotai/ModernBERT-base")
+    max_chars = cfg["scan"]["max_diff_chars"]
+    text_truncated = text[:max_chars]
+
+    # Build inline script that runs inside the venv
+    inline = f'''
+import json, sys, math
+import numpy as np
+from transformers import AutoTokenizer, AutoModel
+
+model_name = {model_name!r}
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
+model.eval()
+
+def to_python(val):
+    """Convert numpy types to native Python for JSON serialization."""
+    if hasattr(val, "item"):
+        return val.item()
+    return val
+
+def cosine(a, b):
+    dot = sum(x*y for x, y in zip(a, b))
+    na = math.sqrt(sum(x*x for x in a))
+    nb = math.sqrt(sum(x*x for x in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+def encode(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=8192, padding=False)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    # [CLS] token embedding (index 0)
+    cls = outputs.last_hidden_state[0, 0, :].numpy()
+    # Normalize
+    norm = np.linalg.norm(cls)
+    if norm > 0:
+        cls = cls / norm
+    return cls
+
+try:
+    text_emb = encode(sys.argv[1])
+    heads = json.loads(sys.argv[2])
+    results = {{}}
+    for tid, task in heads.items():
+        labels = task.get("labels", [])
+        if not labels:
+            results[tid] = {{"label": None, "confidence": 0.0}}
+            continue
+        # Score each label by similarity to its standalone embedding
+        scores = []
+        for label in labels:
+            label_emb = encode(label)
+            scores.append(cosine(text_emb, label_emb))
+        best_idx = max(range(len(scores)), key=lambda i: scores[i])
+        best_label = labels[best_idx]
+        best_score = scores[best_idx]
+        # Compute top2 gap for calibration
+        sorted_scores = sorted(scores, reverse=True)
+        top2_gap = float(sorted_scores[0] - sorted_scores[1]) if len(sorted_scores) > 1 else 1.0
+        results[tid] = {{
+            "label": to_python(best_label),
+            "confidence": to_python(round(best_score, 4)),
+            "all_scores": {{to_python(l): to_python(round(s, 4)) for l, s in zip(labels, scores)}},
+            "top2_gap": to_python(round(top2_gap, 4)),
+            "embedding_norm": to_python(round(float(np.linalg.norm(text_emb)), 4)),
+        }}
+    print(json.dumps(results))
+except Exception as e:
+    print(json.dumps({{"_error": str(e)}}))
+'''
+
+    # Need torch in the inline script too
+    inline = "import torch\n" + inline
+
+    tasks_json = json.dumps({h["task"][:40]: {"labels": h.get("labels", [])} for h in heads})
+
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        [str(venv_python), "-c", inline, text_truncated, tasks_json],
+        capture_output=True,
+        text=True,
+        timeout=cfg["providers"]["request_timeout_seconds"] * 2,  # ModernBERT is slower on CPU
+    )
+    latency_ms = int((time.monotonic() - t0) * 1000)
+
+    if telemetry is not None:
+        telemetry["latency_ms"] = latency_ms
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "")[:300]
+            telemetry["error_kind"] = "timeout" if "timeout" in stderr.lower() else "model_load" if "model" in stderr.lower() else "other"
+            telemetry["stderr"] = stderr
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"ModernBERT eval failed: {proc.stderr[:300]}")
+
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        parsed = {"_raw": proc.stdout[:200]}
+        if telemetry is not None:
+            telemetry["error_kind"] = "json"
+
+    # Normalize output shape to match other providers
+    out: dict = {}
+    for tid, entry in parsed.items():
+        if isinstance(entry, dict) and "_error" not in entry:
+            # Cast numpy types to native Python for JSON safety
+            label = entry.get("label")
+            conf = entry.get("confidence")
+            if hasattr(conf, "item"):  # numpy scalar
+                conf = conf.item()
+            if hasattr(label, "item"):
+                label = label.item()
+            out[tid] = {
+                "label": label,
+                "confidence": conf,
+                # keep all_scores, top2_gap, embedding_norm for dashboards
+                **{k: v for k, v in entry.items() if k in ("all_scores", "top2_gap", "embedding_norm")},
+            }
+        else:
+            out[tid] = {"_raw": str(entry)}
+    return out
+
+
+def _call_local_provider(diff: str, heads: list[dict], cfg: dict, telemetry: dict | None = None) -> dict:
     """
     Call local GLiNER2 via the existing /private/tmp/gliner-decide venv.
     Returns {task_text: {label, confidence}} or raises on failure.
+    If `telemetry` dict is provided, populates it with subprocess signals.
     """
     venv_python = Path(cfg["providers"].get("local_venv", "/private/tmp/gliner-decide")) / "bin" / "python"
     if not venv_python.exists():
@@ -654,10 +930,19 @@ sys.stdout = old_stdout
 print(json.dumps(results))
 '''
 
+    t0 = time.monotonic()
     proc = subprocess.run(
         [str(venv_python), "-c", inline, diff[: cfg["scan"]["max_diff_chars"]], tasks_json],
         capture_output=True, text=True, timeout=cfg["providers"]["request_timeout_seconds"],
     )
+    latency_ms = int((time.monotonic() - t0) * 1000)
+
+    if telemetry is not None:
+        telemetry["latency_ms"] = latency_ms
+        if proc.returncode != 0:
+            telemetry["error_kind"] = "other"
+            telemetry["stderr"] = (proc.stderr or "")[:300]
+
     if proc.returncode != 0:
         raise RuntimeError(f"Local GLiNER failed: {proc.stderr[:300]}")
 
@@ -665,17 +950,25 @@ print(json.dumps(results))
         parsed = json.loads(proc.stdout)
     except json.JSONDecodeError:
         parsed = {"_raw": proc.stdout[:200]}
+        if telemetry is not None:
+            telemetry["error_kind"] = "json"
 
     # Normalize: keys are task[:40] from caller
     out: dict = {}
+    null_count = 0
     for tid, entry in parsed.items():
         if isinstance(entry, dict):
+            label = entry.get("label")
+            if label is None:
+                null_count += 1
             out[tid] = {
-                "label": entry.get("label"),
+                "label": label,
                 "confidence": entry.get("confidence"),
             }
         else:
             out[tid] = {"_raw": str(entry)}
+    if telemetry is not None:
+        telemetry["null_label_count"] = null_count
     return out
 
 
@@ -911,6 +1204,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
     heads = get_task_heads(task, provider.split("+")[0])  # base provider for heads
     results: dict[str, dict] = {}
     providers_used: list[str] = []
+    provider_telemetry: dict[str, dict] = {}
     t0 = time.monotonic()
 
     # Decide call
@@ -925,6 +1219,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
                     {"role": "user", "content": f"Review this git diff and classify it.\n\nDiff:\n{diff}"},
                 ]
                 pcfg = cfg["providers"]
+                decide_telemetry: dict = {}
                 resp = _call_openai_compatible(
                     pcfg["decide_api_url"],
                     decide_key,
@@ -934,10 +1229,12 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
                     timeout=pcfg["request_timeout_seconds"],
                     max_retries=pcfg["max_retries"],
                     backoff=pcfg["retry_backoff_seconds"],
+                    telemetry=decide_telemetry,
                 )
                 parsed = _parse_decide_response(resp)
                 results["decide"] = parsed
                 providers_used.append("decide")
+                provider_telemetry["decide"] = decide_telemetry
             except Exception as e:
                 print(f"⚠ Decide call failed: {e}", file=sys.stderr)
 
@@ -963,22 +1260,14 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
                     "state": payload_state,
                     "questions": payload_questions,
                     "model": pcfg["jev_model"],
-                }).encode()
-                req = urllib.request.Request(
-                    pcfg["jev_api_url"],
-                    data=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {jev_key}",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=pcfg["request_timeout_seconds"]) as resp:
-                    raw = json.loads(resp.read().decode())
+                })
+                jev_telemetry: dict = {}
+                raw = _call_jev_raw(body, jev_key, cfg, telemetry=jev_telemetry)
 
                 parsed = _parse_jev_response(raw, [q["id"] for q in questions])
                 results["jev"] = parsed
                 providers_used.append("jev")
+                provider_telemetry["jev"] = jev_telemetry
             except Exception as e:
                 print(f"⚠ Jev call failed: {e}", file=sys.stderr)
 
@@ -986,11 +1275,25 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
     if provider in ("local", "both"):
         try:
             local_heads = get_task_heads(task, "local")
-            parsed = _call_local_provider(diff, local_heads, cfg)
+            local_telemetry: dict = {}
+            parsed = _call_local_provider(diff, local_heads, cfg, telemetry=local_telemetry)
             results["local"] = parsed
             providers_used.append("local")
+            provider_telemetry["local"] = local_telemetry
         except Exception as e:
             print(f"⚠ Local GLiNER call failed: {e}", file=sys.stderr)
+
+    # ModernBERT eval — raw inference, no fine-tuning, logged separately
+    if provider == "modernbert":
+        try:
+            modernbert_heads = get_task_heads(task, "modernbert")
+            modernbert_telemetry: dict = {}
+            parsed = _call_modernbert_provider(diff, modernbert_heads, cfg, telemetry=modernbert_telemetry)
+            results["modernbert_raw"] = parsed
+            providers_used.append("modernbert_raw")
+            provider_telemetry["modernbert_raw"] = modernbert_telemetry
+        except Exception as e:
+            print(f"⚠ ModernBERT eval failed: {e}", file=sys.stderr)
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1044,6 +1347,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         "verdict": "escalated" if escalated else "pass",
         "escalated": escalated,
         "latency_ms": elapsed_ms,
+        "telemetry": provider_telemetry,
     })
 
     if escalated and cfg["classify"]["block_on_classification"]:
@@ -1115,17 +1419,21 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
         # Regex match is authoritative for destructive flag; model refines reversibility
         destructive = True
         reversible = "unknown"
+        reversible_conf = None
 
         # Run safety task via local provider (fast, fully local) to check reversibility
         try:
             heads = get_task_heads("safety", "local")
-            safety_result = _call_local_provider(git_cmd, heads, cfg)
+            safety_telemetry: dict = {}
+            safety_result = _call_local_provider(git_cmd, heads, cfg, telemetry=safety_telemetry)
             for key, val in safety_result.items():
                 if isinstance(val, dict):
                     label = val.get("label")
+                    conf = val.get("confidence")
                     if label:
                         if "reversible" in key.lower():
                             reversible = label if isinstance(label, str) else str(label)
+                            reversible_conf = conf
         except Exception as e:
             print(f"[gate] safety task failed: {e} — reversibility unknown", file=sys.stderr)
 
@@ -1140,6 +1448,7 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
                 "verdict": "advisory_warn",
                 "destructive": True,
                 "reversible": reversible,
+                "reversible_confidence": reversible_conf,
                 "advisory_only": True,
             })
             return EXIT_WARN
@@ -1152,6 +1461,7 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
                 "verdict": "block",
                 "destructive": True,
                 "reversible": reversible,
+                "reversible_confidence": reversible_conf,
                 "advisory_only": False,
             })
             return EXIT_BLOCK
@@ -1366,6 +1676,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _find_result_by_prefix(result: dict, prefix: str) -> dict:
+    """Find the first result key that starts with `prefix` (handles task[:40] truncation)."""
+    for key in result:
+        if key.startswith(prefix):
+            return result[key]
+    return {}
+
+
 def cmd_fleet_scan(args: argparse.Namespace) -> int:
     """Run api_drift task across the last commit of every repo under a root."""
     root = Path(args.root or (Path.home() / "Projects")).expanduser().resolve()
@@ -1403,9 +1721,15 @@ def cmd_fleet_scan(args: argparse.Namespace) -> int:
             heads = get_task_heads(task, provider if provider != "both" else "decide")
 
             # Run the classification inline (simplified)
+            item_telemetry: dict = {}
             if provider == "local":
                 try:
-                    result = _call_local_provider(diff, heads, cfg)
+                    result = _call_local_provider(diff, heads, cfg, telemetry=item_telemetry)
+                except Exception:
+                    continue
+            elif provider == "modernbert":
+                try:
+                    result = _call_modernbert_provider(diff, heads, cfg, telemetry=item_telemetry)
                 except Exception:
                     continue
             elif provider == "decide":
@@ -1413,13 +1737,15 @@ def cmd_fleet_scan(args: argparse.Namespace) -> int:
             else:
                 continue
 
-            # Extract api_drift answers
-            public_api = result.get("Does this diff modify any public API surface (routes, schemas, exported functions, types, interfaces, RPC methods)?", {})
-            breaking = result.get("Does this diff introduce a breaking change to the public API?", {})
+            # Extract api_drift answers (prefix-match to handle task[:40] truncation in providers)
+            public_api = _find_result_by_prefix(result, "Does this diff modify any public API surface")
+            breaking = _find_result_by_prefix(result, "Does this diff introduce a breaking change")
+            sev_prefix = "If there is a breaking change, how severe is it"
+            sev_raw = _find_result_by_prefix(result, sev_prefix)
 
             pub_label = public_api.get("label", "?")
             brk_label = breaking.get("label", "?")
-            sev_label = result.get("If there is a breaking change, how severe is it? high = requires immediate migration; medium = requires migration but has deprecation path; low = backward-compatible.", {}).get("label", "?")
+            sev_label = sev_raw.get("label", "?")
 
             # confidence from the highest-confidence head
             confs = [v.get("confidence") for v in result.values() if isinstance(v, dict) and v.get("confidence") is not None]
@@ -1431,6 +1757,19 @@ def cmd_fleet_scan(args: argparse.Namespace) -> int:
                 escalated_count += 1
 
             print(f"  {repo.name:<32} {pub_label:<12} {brk_label:<10} {sev_label:<10} {conf_str:<8}{flag}")
+
+            # Log per-repo fleet-scan item for dashboard aggregation
+            log_record({
+                "op": "fleet-scan-item",
+                "repo": repo.name,
+                "task": task,
+                "provider": provider,
+                "public_api": pub_label,
+                "breaking": brk_label,
+                "severity": sev_label,
+                "confidence": conf_str,
+                "telemetry": item_telemetry,
+            })
         except Exception:
             continue
 
@@ -1536,6 +1875,7 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
 
     try:
         if provider in ("decide", "both"):
+            decide_telemetry: dict = {}
             result = _call_openai_compatible(
                 cfg["providers"]["decide_api_url"],
                 _env_key("decide"),
@@ -1548,16 +1888,22 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
                 timeout=cfg["providers"]["request_timeout_seconds"],
                 max_retries=cfg["providers"]["max_retries"],
                 backoff=cfg["providers"]["retry_backoff_seconds"],
+                telemetry=decide_telemetry,
             )
             parsed = _parse_decide_response(result)
         elif provider == "jev":
+            jev_telemetry: dict = {}
             questions = get_task_heads(task, "jev")
             payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
             body = json.dumps({"state": {"diff": diff[:DEFAULT_MAX_DIFF_CHARS], "task": task}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
-            resp = _call_jev_raw(body, _env_key("jev"))
+            resp = _call_jev_raw(body, _env_key("jev"), cfg, telemetry=jev_telemetry)
             parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+        elif provider == "modernbert":
+            modernbert_telemetry: dict = {}
+            parsed = _call_modernbert_provider(diff, heads, cfg, telemetry=modernbert_telemetry)
         else:
-            parsed = _call_local_provider(diff, heads, cfg)
+            local_telemetry: dict = {}
+            parsed = _call_local_provider(diff, heads, cfg, telemetry=local_telemetry)
     except Exception as e:
         print(f"error: classification failed: {e}", file=sys.stderr)
         return EXIT_ERROR
@@ -1595,10 +1941,13 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
     log_record({
         "op": "pr-gate",
         "pr": pr_num,
+        "repo": repo_name(get_repo_root() or Path(".")),
         "task": task,
         "provider": provider,
         "labels": labels_to_apply,
         "dry_run": dry_run,
+        "verdict": "pass" if not labels_to_apply else "applied",
+        "telemetry": decide_telemetry if provider in ("decide", "both") else (jev_telemetry if provider == "jev" else (modernbert_telemetry if provider == "modernbert" else local_telemetry)),
     })
     return EXIT_OK
 
@@ -1638,12 +1987,14 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
     print(f"  {'#':<6} {'kind':<12} {'priority':<10} {'labels':<30} title")
     print(f"  {'─'*6} {'─'*12} {'─'*10} {'─'*30} {'─'*40}")
 
+    items: list[dict] = []
     for issue in issues:
         num = issue["number"]
         title = issue.get("title", "")
         body = issue.get("body", "") or ""
         text = f"{title}\n\n{body}"[:DEFAULT_MAX_DIFF_CHARS]
 
+        item_telemetry: dict = {}
         try:
             if provider in ("decide", "both"):
                 result = _call_openai_compatible(
@@ -1658,16 +2009,25 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
                     timeout=cfg["providers"]["request_timeout_seconds"],
                     max_retries=cfg["providers"]["max_retries"],
                     backoff=cfg["providers"]["retry_backoff_seconds"],
+                    telemetry=item_telemetry,
                 )
                 parsed = _parse_decide_response(result)
             elif provider == "jev":
+                jev_telemetry: dict = {}
                 questions = get_task_heads(task, "jev")
                 payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
                 body = json.dumps({"state": {"text": text[:DEFAULT_MAX_DIFF_CHARS], "task": task}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
-                resp = _call_jev_raw(body, _env_key("jev"))
+                resp = _call_jev_raw(body, _env_key("jev"), cfg, telemetry=jev_telemetry)
                 parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+                item_telemetry = jev_telemetry
+            elif provider == "modernbert":
+                modernbert_telemetry: dict = {}
+                parsed = _call_modernbert_provider(text, heads, cfg, telemetry=modernbert_telemetry)
+                item_telemetry = modernbert_telemetry
             else:
-                parsed = _call_local_provider(text, heads, cfg)
+                local_telemetry: dict = {}
+                parsed = _call_local_provider(text, heads, cfg, telemetry=local_telemetry)
+                item_telemetry = local_telemetry
         except Exception as e:
             print(f"  {num:<6} error: {e}")
             continue
@@ -1699,12 +2059,23 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
                 except RuntimeError as e:
                     print(f"    ✗ failed to apply {label}: {e}", file=sys.stderr)
 
+        items.append({
+            "num": num,
+            "title": title,
+            "kind": kind,
+            "priority": priority,
+            "labels": labels_to_apply,
+            "telemetry": item_telemetry,
+        })
+
     log_record({
         "op": "triage-issues",
+        "repo": repo,
         "count": len(issues),
         "task": task,
         "provider": provider,
         "dry_run": dry_run,
+        "items": items,
     })
     return EXIT_OK
 
@@ -1746,6 +2117,7 @@ def cmd_changelog(args: argparse.Namespace) -> int:
     sections = {"Added": [], "Changed": [], "Fixed": [], "Removed": [], "Security": []}
     cfg = load_config(repo)
     heads = get_task_heads("change", provider.split("+")[0])
+    last_commit_telemetry: dict = {}
 
     for c in commits:
         sha = c["sha"]
@@ -1764,6 +2136,7 @@ def cmd_changelog(args: argparse.Namespace) -> int:
             sections["Changed"].append(subject)
             continue
 
+        commit_telemetry: dict = {}
         try:
             if provider in ("decide", "both"):
                 result = _call_openai_compatible(
@@ -1778,16 +2151,25 @@ def cmd_changelog(args: argparse.Namespace) -> int:
                     timeout=cfg["providers"]["request_timeout_seconds"],
                     max_retries=cfg["providers"]["max_retries"],
                     backoff=cfg["providers"]["retry_backoff_seconds"],
+                    telemetry=commit_telemetry,
                 )
                 parsed = _parse_decide_response(result)
             elif provider == "jev":
+                jev_telemetry: dict = {}
                 questions = get_task_heads("change", "jev")
                 payload_questions = {q["id"]: {"type": q["type"], "instructions": q["instructions"], "criteria": q.get("criteria")} for q in questions}
                 body = json.dumps({"state": {"subject": subject, "diff": diff[:DEFAULT_MAX_DIFF_CHARS]}, "questions": payload_questions, "model": cfg["providers"]["jev_model"]})
-                resp = _call_jev_raw(body, _env_key("jev"))
+                resp = _call_jev_raw(body, _env_key("jev"), cfg, telemetry=jev_telemetry)
                 parsed = _parse_jev_response(resp, [q["id"] for q in questions])
+                commit_telemetry = jev_telemetry
+            elif provider == "modernbert":
+                modernbert_telemetry: dict = {}
+                parsed = _call_modernbert_provider(diff, heads, cfg, telemetry=modernbert_telemetry)
+                commit_telemetry = modernbert_telemetry
             else:
-                parsed = _call_local_provider(diff, heads, cfg)
+                local_telemetry: dict = {}
+                parsed = _call_local_provider(diff, heads, cfg, telemetry=local_telemetry)
+                commit_telemetry = local_telemetry
         except Exception as e:
             sections["Changed"].append(subject)
             continue
@@ -1814,6 +2196,8 @@ def cmd_changelog(args: argparse.Namespace) -> int:
             sections["Security"].append(subject)
         else:
             sections["Changed"].append(subject)
+
+        last_commit_telemetry = commit_telemetry
 
     # Render markdown
     lines = [f"## [{args.next_version or 'Unreleased'}]\n"]
@@ -1848,6 +2232,8 @@ def cmd_changelog(args: argparse.Namespace) -> int:
         "commits": len(commits),
         "provider": provider,
         "write": write,
+        "repo": repo_name(repo),
+        "commit_telemetry": commit_telemetry if 'commit_telemetry' in dir() else {},
     })
     return EXIT_OK
 
@@ -1926,7 +2312,666 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-# ── argparse ─────────────────────────────────────────────────────────────────
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """
+    Record human feedback for a previous classification.
+    Appends to LOG_DIR/feedback.jsonl with ts, input_sha256, task,
+    provider (optional), label (ground truth), and note (optional).
+    Dashboard joins on (input_sha256, task) to compute calibration curves.
+    """
+    input_sha256 = getattr(args, "input_sha256", None)
+    if not input_sha256:
+        print("error: input_sha256 is required", file=sys.stderr)
+        return EXIT_ERROR
+
+    task = getattr(args, "task", None)
+    if not task:
+        print("error: --task is required", file=sys.stderr)
+        return EXIT_ERROR
+
+    label = getattr(args, "label", None)
+    if not label:
+        print("error: --label is required", file=sys.stderr)
+        return EXIT_ERROR
+
+    provider = getattr(args, "provider", None)
+    note = getattr(args, "note", None)
+
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "input_sha256": input_sha256,
+        "task": task,
+        "provider": provider,
+        "label": label,
+        "note": note,
+    }
+
+    try:
+        feedback_dir = LOG_DIR / "feedback"
+        feedback_dir.mkdir(parents=True, exist_ok=True)
+        feedback_path = feedback_dir / "feedback.jsonl"
+        with open(feedback_path, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+        print(f"Logged feedback for {input_sha256} (task={task}, label={label})")
+        return EXIT_OK
+    except Exception as e:
+        print(f"error: failed to write feedback: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+# ── dashboard ─────────────────────────────────────────────────────────────────
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dev-decisions dashboard</title>
+<style>
+  :root {
+    --bg: #0b0f19;
+    --panel: #111827;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --accent: #60a5fa;
+    --danger: #f87171;
+    --warn: #fbbf24;
+    --success: #34d399;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(17,24,39,.9), rgba(17,24,39,.6));
+  }
+  header h1 {
+    margin: 0 0 6px 0;
+    font-size: 18px;
+    letter-spacing: .2px;
+  }
+  header p { margin: 0; color: var(--muted); font-size: 12px; }
+  main {
+    padding: 18px;
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 16px;
+  }
+  .panel {
+    grid-column: span 12;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .panel h2 {
+    margin: 0 0 10px 0;
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .6px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: var(--mono);
+  }
+  th, td { padding: 7px 9px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  tr:last-child td { border-bottom: none; }
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: #1f2937;
+    border: 1px solid #374151;
+  }
+  .ok { color: var(--success); }
+  .warn { color: var(--warn); }
+  .err { color: var(--danger); }
+  .muted { color: var(--muted); }
+  .bar { height: 8px; border-radius: 4px; background: #1f2937; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  code { font-family: var(--mono); font-size: 11px; color: #c7d2fe; background: #0b1220; padding: 2px 6px; border-radius: 4px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .col { flex: 1 1 280px; min-width: 260px; }
+  @media (max-width: 980px) {
+    main { grid-template-columns: 1fr; }
+    .panel { grid-column: span 1; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>dev-decisions</h1>
+  <p>provider telemetry • calibration • modernbert eval</p>
+</header>
+<main>
+  <section class="panel">
+    <h2>provider health</h2>
+    <div id="summary">loading…</div>
+  </section>
+
+  <section class="panel">
+    <h2>confidence histograms</h2>
+    <div id="confidence">loading…</div>
+  </section>
+
+  <section class="panel">
+    <h2>modernbert signals</h2>
+    <div id="modernbert">loading…</div>
+  </section>
+
+  <section class="panel">
+    <h2>cross-provider agreement</h2>
+    <div id="agreement">loading…</div>
+  </section>
+
+  <section class="panel">
+    <h2>calibration (human feedback)</h2>
+    <div id="calibration">loading…</div>
+  </section>
+</main>
+
+<script>
+function el(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls; if(text!==undefined) e.textContent=text; return e; }
+function num(v){ const n=Number(v); return Number.isFinite(n)?n:null; }
+function fmt(n){ if(n===null) return '—'; if(n>=1e6) return (n/1e6).toFixed(1)+'M'; if(n>=1e3) return (n/1e3).toFixed(1)+'k'; return String(n); }
+function pct(n){ if(n===null) return '—'; return (n*100).toFixed(1)+'%'; }
+function bar(pct){ const d=document.createElement('div'); d.className='bar'; const i=document.createElement('i'); i.style.width=pct; d.appendChild(i); return d; }
+
+async function api(path){
+  const r=await fetch(path); if(!r.ok) throw new Error(r.status+' '+r.statusText); return r.json();
+}
+
+function renderSummary(data){
+  const wrap=document.getElementById('summary');
+  wrap.innerHTML='';
+  if(!data.providers||!data.providers.length){ wrap.textContent='no data'; return; }
+  const row=document.createElement('div'); row.className='row';
+  for(const p of data.providers){
+    const col=document.createElement('div'); col.className='col panel';
+    col.style.background='#0b1220';
+    col.style.border='1px solid #1f2937';
+    col.innerHTML=`<h2 style="margin-top:0"><code>${p.name}</code> <span class="badge">${fmt(p.calls)} calls</span></h2>`;
+    const stats = document.createElement('div');
+    stats.style.cssText = 'font-size:12px;margin-bottom:10px;';
+    stats.innerHTML = `err <code>${pct(p.error_rate)}</code> · p50 <code>${p.latency_p50?p.latency_p50.toFixed(0)+'ms':'—'}</code> · p95 <code>${p.latency_p95?p.latency_p95.toFixed(0)+'ms':'—'}</code> · null <code>${pct(p.null_rate)}</code>`;
+    col.appendChild(stats);
+    if(p.latency_bins && p.latency_bins.length){
+      const h = document.createElement('div');
+      h.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:6px">latency distribution</div>';
+      const max = Math.max(...p.latency_bins.map(b=>b.count), 1);
+      for(const b of p.latency_bins){
+        const line=document.createElement('div');
+        line.style.marginBottom='6px';
+        line.innerHTML=`<div style="display:flex;justify-content:space-between;font-size:11px"><span>${b.bin}</span><span>${b.count}</span></div>`;
+        line.appendChild(bar((b.count/max)*100));
+        h.appendChild(line);
+      }
+      col.appendChild(h);
+    }
+    row.appendChild(col);
+  }
+  wrap.appendChild(row);
+}
+
+function renderConfidence(data){
+  const wrap=document.getElementById('confidence');
+  wrap.innerHTML='';
+  if(!data.providers||!data.providers.length){ wrap.textContent='no data'; return; }
+  const row=document.createElement('div'); row.className='row';
+  for(const p of data.providers){
+    const col=document.createElement('div'); col.className='col panel';
+    col.style.background='#0b1220';
+    col.style.border='1px solid #1f2937';
+    col.innerHTML=`<h2 style="margin-top:0"><code>${p.name}</code> <span class="badge">${p.calls} calls</span></h2>`;
+    const bins = (p.fine_bins && p.fine_bins.length) ? p.fine_bins : p.bins;
+    const label = (p.fine_bins && p.fine_bins.length) ? 'confidence (fine)' : 'confidence';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:8px;';
+    title.textContent = label;
+    col.appendChild(title);
+    if(!bins||!bins.length){ col.innerHTML+='<div class="muted">no confidence data</div>'; }
+    else {
+      const max=Math.max(...bins.map(b=>b.count));
+      for(const b of bins){
+        const line=document.createElement('div');
+        line.style.marginBottom='6px';
+        line.innerHTML=`<div style="display:flex;justify-content:space-between;font-size:11px"><span>${b.bin}</span><span>${b.count}</span></div>`;
+        line.appendChild(bar((b.count/Math.max(max,1))*100));
+        col.appendChild(line);
+      }
+    }
+    row.appendChild(col);
+  }
+  wrap.appendChild(row);
+}
+
+function renderModernbert(data){
+  const wrap=document.getElementById('modernbert');
+  wrap.innerHTML='';
+  if(!data.tasks||!data.tasks.length){ wrap.innerHTML='<div class="muted">no modernbert data yet</div>'; return; }
+  for(const t of data.tasks){
+    const section = document.createElement('div');
+    section.className='panel';
+    section.style.marginBottom='12px';
+    section.innerHTML=`<h2 style="margin-top:0"><code>${t.name}</code> <span class="badge">${fmt(t.calls)} calls</span></h2>`;
+    const meta = document.createElement('div');
+    meta.style.cssText = 'font-size:12px;margin-bottom:10px;';
+    meta.innerHTML = `avg top2-gap <code>${t.avg_top2===null?'—':t.avg_top2.toFixed(3)}</code> · embedding norm <code>${t.avg_norm===null?'—':t.avg_norm.toFixed(2)}</code>`;
+    section.appendChild(meta);
+    if(t.top2_bins && t.top2_bins.length){
+      const h = document.createElement('div');
+      h.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:6px">top2-gap spread</div>';
+      const max = Math.max(...t.top2_bins.map(b=>b.count), 1);
+      for(const b of t.top2_bins){
+        const line=document.createElement('div');
+        line.style.marginBottom='6px';
+        line.innerHTML=`<div style="display:flex;justify-content:space-between;font-size:11px"><span>${b.bin}</span><span>${b.count}</span></div>`;
+        line.appendChild(bar((b.count/max)*100));
+        h.appendChild(line);
+      }
+      section.appendChild(h);
+    }
+    if(t.norm_bins && t.norm_bins.length){
+      const h = document.createElement('div');
+      h.innerHTML='<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">embedding-norm spread</div>';
+      const max = Math.max(...t.norm_bins.map(b=>b.count), 1);
+      for(const b of t.norm_bins){
+        const line=document.createElement('div');
+        line.style.marginBottom='6px';
+        line.innerHTML=`<div style="display:flex;justify-content:space-between;font-size:11px"><span>${b.bin}</span><span>${b.count}</span></div>`;
+        line.appendChild(bar((b.count/max)*100));
+        h.appendChild(line);
+      }
+      section.appendChild(h);
+    }
+    const top=(t.top_labels||[]).map(x=>`${x.label}(${x.count})`).join(', ') || '—';
+    const labels = document.createElement('div');
+    labels.style.cssText = 'font-size:12px;margin-top:8px;';
+    labels.innerHTML = `<span class="muted">top labels:</span> ${top}`;
+    section.appendChild(labels);
+    wrap.appendChild(section);
+  }
+}
+
+function renderAgreement(data){
+  const wrap=document.getElementById('agreement');
+  wrap.innerHTML='';
+  if(!data.pairs||!data.pairs.length){ wrap.innerHTML='<div class="muted">no cross-provider data yet</div>'; return; }
+  const tbl=document.createElement('table');
+  tbl.innerHTML=`<thead><tr><th>pair</th><th>compared</th><th>agree</th><th>rate</th></tr></thead>`;
+  const body=document.createElement('tbody');
+  for(const p of data.pairs){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td><code>${p.pair}</code></td>
+      <td>${fmt(p.compared)}</td>
+      <td>${fmt(p.agree)}</td>
+      <td>${pct(p.rate)}</td>
+    `;
+    body.appendChild(tr);
+  }
+  tbl.appendChild(body);
+  wrap.appendChild(tbl);
+}
+
+function renderCalibration(data){
+  const wrap=document.getElementById('calibration');
+  wrap.innerHTML='';
+  if(!data.bins||!data.bins.length){ wrap.innerHTML='<div class="muted">no feedback yet. use <code>dev-decisions feedback</code></div>'; return; }
+  const tbl=document.createElement('table');
+  tbl.innerHTML=`<thead><tr><th>provider</th><th>conf bin</th><th>samples</th><th>correct</th><th>accuracy</th></tr></thead>`;
+  const body=document.createElement('tbody');
+  for(const b of data.bins){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td><code>${b.provider}</code></td>
+      <td>${b.bin}</td>
+      <td>${fmt(b.samples)}</td>
+      <td>${fmt(b.correct)}</td>
+      <td class="${(b.accuracy||0)>=0.8?'ok':(b.accuracy||0)>=0.6?'warn':'err'}">${pct(b.accuracy)}</td>
+    `;
+    body.appendChild(tr);
+  }
+  tbl.appendChild(body);
+  wrap.appendChild(tbl);
+}
+
+async function init(){
+  try {
+    const [summary, confidence, modernbert, agreement, calibration] = await Promise.all([
+      api('/api/summary?days=7'),
+      api('/api/confidence?days=7'),
+      api('/api/modernbert?days=7'),
+      api('/api/agreement?days=7'),
+      api('/api/calibration?days=7'),
+    ]);
+    renderSummary(summary);
+    renderConfidence(confidence);
+    renderModernbert(modernbert);
+    renderAgreement(agreement);
+    renderCalibration(calibration);
+  } catch (e) {
+    document.body.innerHTML='<main class="panel"><h2>dashboard error</h2><pre>'+e+'</pre></main>';
+  }
+}
+init();
+</script>
+</body>
+</html>
+"""
+
+
+class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, days: int = 7, base: Path = LOG_DIR, **kwargs):
+        self._days = days
+        self._base = base
+        super().__init__(*args, **kwargs)
+
+    def log_message(self, format, *args):
+        pass
+
+    def _read_jsonl(self, relpath: str):
+        path = self._base / relpath
+        if not path.exists():
+            return []
+        records = []
+        for line in path.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _filter_days(self, records):
+        cutoff = datetime.now(timezone.utc).timestamp() - (self._days * 86400)
+        out = []
+        for r in records:
+            try:
+                ts = datetime.fromisoformat(r.get("ts", "")).timestamp()
+            except Exception:
+                continue
+            if ts >= cutoff:
+                out.append(r)
+        return out
+
+    def _json(self, payload, code=200):
+        body = json.dumps(payload, default=str).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/" or self.path == "/index.html":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(_DASHBOARD_HTML.encode())))
+            self.end_headers()
+            self.wfile.write(_DASHBOARD_HTML.encode())
+            return
+        if self.path.startswith("/api/summary"):
+            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
+            # fallback: read all dated dirs
+            if not records and (self._base / "2026").exists():
+                all_records = []
+                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                    all_records.extend(self._read_jsonl(p.relative_to(self._base)))
+                records = self._filter_days(all_records)
+            providers = {}
+            for r in records:
+                for prov, tel in (r.get("telemetry") or {}).items():
+                    bucket = providers.setdefault(prov, {"calls": 0, "errors": 0, "latencies": [], "nulls": 0, "nouls": 0, "structured": 0})
+                    bucket["calls"] += 1
+                    if tel.get("error_kind") or tel.get("http_status", 200) >= 400:
+                        bucket["errors"] += 1
+                    if tel.get("latency_ms") is not None:
+                        bucket["latencies"].append(tel["latency_ms"])
+                    if tel.get("null_label_count"):
+                        bucket["nulls"] += tel["null_label_count"]
+                    if tel.get("noul_count"):
+                        bucket["nouls"] += tel["noul_count"]
+                    if tel.get("structured_ok"):
+                        bucket["structured"] += 1
+            provider_list = []
+            for name, b in sorted(providers.items()):
+                latencies = sorted(b["latencies"])
+                p50 = latencies[len(latencies)//2] if latencies else None
+                p95 = latencies[int(len(latencies)*0.95)] if latencies else None
+                # latency histogram bins: 0-500ms, 500-1000ms, 1-2s, 2-5s, 5-10s, 10s+
+                lat_bins = [{"bin": "<500ms", "count": 0}, {"bin": "0.5-1s", "count": 0}, {"bin": "1-2s", "count": 0}, {"bin": "2-5s", "count": 0}, {"bin": "5-10s", "count": 0}, {"bin": ">10s", "count": 0}]
+                for lat in latencies:
+                    if lat < 500: lat_bins[0]["count"] += 1
+                    elif lat < 1000: lat_bins[1]["count"] += 1
+                    elif lat < 2000: lat_bins[2]["count"] += 1
+                    elif lat < 5000: lat_bins[3]["count"] += 1
+                    elif lat < 10000: lat_bins[4]["count"] += 1
+                    else: lat_bins[5]["count"] += 1
+                provider_list.append({
+                    "name": name,
+                    "calls": b["calls"],
+                    "error_rate": b["errors"] / max(b["calls"], 1),
+                    "latency_p50": p50,
+                    "latency_p95": p95,
+                    "latency_bins": lat_bins,
+                    "null_rate": b["nulls"] / max(b["calls"]*2, 1),  # rough: 2 heads per call
+                    "noul_rate": b["nouls"] / max(b["calls"]*2, 1),
+                    "structured_rate": b["structured"] / max(b["calls"], 1),
+                })
+            self._json({"providers": provider_list})
+            return
+        if self.path.startswith("/api/confidence"):
+            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
+            if not records and (self._base / "2026").exists():
+                all_records = []
+                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                    all_records.extend(self._read_jsonl(p.relative_to(self._base)))
+                records = self._filter_days(all_records)
+            providers = {}
+            for r in records:
+                for prov, heads in (r.get("heads") or {}).items():
+                    bucket = providers.setdefault(prov, [])
+                    for h in heads.values():
+                        if isinstance(h, dict) and h.get("confidence") is not None:
+                            bucket.append(h["confidence"])
+            provider_list = []
+            for name, confs in sorted(providers.items()):
+                bins = [{"bin": "<0.5", "count": 0}, {"bin": "0.5-0.6", "count": 0}, {"bin": "0.6-0.7", "count": 0}, {"bin": "0.7-0.8", "count": 0}, {"bin": "0.8-0.9", "count": 0}, {"bin": "0.9-1.0", "count": 0}]
+                fine = [{"bin": f"{(i*0.05):.2f}-{((i+1)*0.05):.2f}", "count": 0} for i in range(20)]
+                for c in confs:
+                    if c < 0.5: bins[0]["count"] += 1
+                    elif c < 0.6: bins[1]["count"] += 1
+                    elif c < 0.7: bins[2]["count"] += 1
+                    elif c < 0.8: bins[3]["count"] += 1
+                    elif c < 0.9: bins[4]["count"] += 1
+                    else: bins[5]["count"] += 1
+                    idx = min(int(c / 0.05), 19)
+                    fine[idx]["count"] += 1
+                provider_list.append({"name": name, "bins": bins, "fine_bins": fine})
+            self._json({"providers": provider_list})
+            return
+        if self.path.startswith("/api/modernbert"):
+            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
+            if not records and (self._base / "2026").exists():
+                all_records = []
+                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                    all_records.extend(self._read_jsonl(p.relative_to(self._base)))
+                records = self._filter_days(all_records)
+            tasks = {}
+            for r in records:
+                if "modernbert_raw" not in (r.get("providers_used") or []):
+                    continue
+                heads = r.get("heads", {}).get("modernbert_raw", {})
+                for tid, h in heads.items():
+                    if not isinstance(h, dict):
+                        continue
+                    bucket = tasks.setdefault(tid, {"calls": 0, "top2_gaps": [], "norms": [], "labels": {}})
+                    bucket["calls"] += 1
+                    if h.get("top2_gap") is not None:
+                        bucket["top2_gaps"].append(h["top2_gap"])
+                    if h.get("embedding_norm") is not None:
+                        bucket["norms"].append(h["embedding_norm"])
+                    label = h.get("label")
+                    if label:
+                        bucket["labels"][label] = bucket["labels"].get(label, 0) + 1
+            task_list = []
+            for name, b in sorted(tasks.items()):
+                top_labels = sorted(b["labels"].items(), key=lambda x: x[1], reverse=True)[:5]
+                top2 = b["top2_gaps"]
+                norms = b["norms"]
+                top2_bins = [{"bin": f"{(i*0.1):.1f}-{((i+1)*0.1):.1f}", "count": 0} for i in range(10)]
+                for g in top2:
+                    idx = min(int(g / 0.1), 9)
+                    top2_bins[idx]["count"] += 1
+                norm_bins = None
+                if norms:
+                    lo = min(norms)
+                    hi = max(norms)
+                    if hi > lo:
+                        step = (hi - lo) / 10 or 0.01
+                        norm_bins = [{"bin": f"{lo + i*step:.2f}-{lo + (i+1)*step:.2f}", "count": 0} for i in range(10)]
+                        for n in norms:
+                            idx = min(int((n - lo) / step), 9)
+                            norm_bins[idx]["count"] += 1
+                task_list.append({
+                    "name": name,
+                    "calls": b["calls"],
+                    "avg_top2": sum(top2)/len(top2) if top2 else None,
+                    "avg_norm": sum(norms)/len(norms) if norms else None,
+                    "top_labels": [{"label": l, "count": c} for l, c in top_labels],
+                    "top2_bins": top2_bins,
+                    "norm_bins": norm_bins,
+                })
+            self._json({"tasks": task_list})
+            return
+        if self.path.startswith("/api/agreement"):
+            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
+            if not records and (self._base / "2026").exists():
+                all_records = []
+                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                    all_records.extend(self._read_jsonl(p.relative_to(self._base)))
+                records = self._filter_days(all_records)
+            pairs = {}
+            for r in records:
+                sha = r.get("input_sha256")
+                if not sha:
+                    continue
+                heads = r.get("heads", {})
+                provs = [p for p in r.get("providers_used", []) if p in heads]
+                for i in range(len(provs)):
+                    for j in range(i+1, len(provs)):
+                        a, b = provs[i], provs[j]
+                        ha, hb = heads.get(a, {}), heads.get(b, {})
+                        labels_a = [v.get("label") for v in ha.values() if isinstance(v, dict)]
+                        labels_b = [v.get("label") for v in hb.values() if isinstance(v, dict)]
+                        key = f"{a} vs {b}"
+                        bucket = pairs.setdefault(key, {"compared": 0, "agree": 0})
+                        bucket["compared"] += 1
+                        if set(labels_a) & set(labels_b):
+                            bucket["agree"] += 1
+            pair_list = [{"pair": k, "compared": v["compared"], "agree": v["agree"], "rate": v["agree"]/max(v["compared"],1)} for k,v in pairs.items()]
+            self._json({"pairs": pair_list})
+            return
+        if self.path.startswith("/api/calibration"):
+            feedback = self._filter_days(self._read_jsonl(Path("feedback") / "feedback.jsonl"))
+            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
+            if not records and (self._base / "2026").exists():
+                all_records = []
+                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                    all_records.extend(self._read_jsonl(p.relative_to(self._base)))
+                records = self._filter_days(all_records)
+            index = {}
+            for r in records:
+                index.setdefault(r.get("input_sha256",""), []).append(r)
+            bins = []
+            for fb in feedback:
+                sha = fb.get("input_sha256")
+                task = fb.get("task")
+                prov = fb.get("provider")
+                true_label = fb.get("label")
+                for r in index.get(sha, []):
+                    heads = r.get("heads", {})
+                    for p, h in heads.items():
+                        if prov and p != prov:
+                            continue
+                        for v in h.values():
+                            if isinstance(v, dict) and v.get("confidence") is not None:
+                                conf = v["confidence"]
+                                correct = 1 if v.get("label") == true_label else 0
+                                bin_label = "<0.5" if conf < 0.5 else ("0.5-0.6" if conf < 0.6 else ("0.6-0.7" if conf < 0.7 else ("0.7-0.8" if conf < 0.8 else ("0.8-0.9" if conf < 0.9 else "0.9-1.0"))))
+                                bins.append({"provider": p, "bin": bin_label, "correct": correct})
+            # aggregate
+            agg = {}
+            for b in bins:
+                key = (b["provider"], b["bin"])
+                a = agg.setdefault(key, {"provider": b["provider"], "bin": b["bin"], "samples": 0, "correct": 0})
+                a["samples"] += 1
+                a["correct"] += b["correct"]
+            out = []
+            for a in agg.values():
+                a["accuracy"] = a["correct"] / max(a["samples"], 1)
+                out.append(a)
+            self._json({"bins": out})
+            return
+        self.send_response(404)
+        self.end_headers()
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """
+    Start a local stdlib dashboard for provider telemetry.
+    Binds to 127.0.0.1:8765 by default; open / no-open to control browser.
+    """
+    port = getattr(args, "port", 8765)
+    host = getattr(args, "host", "127.0.0.1")
+    days = getattr(args, "days", 7)
+    no_open = getattr(args, "no_open", False)
+
+    if not shutil.which("python3"):
+        print("error: python3 not found", file=sys.stderr)
+        return EXIT_ERROR
+
+    import socketserver, threading
+    from pathlib import Path
+
+    base = LOG_DIR
+
+    def make_handler(*a, **kw):
+        return _DashboardHandler(*a, days=days, base=base, **kw)
+
+    try:
+        with socketserver.TCPServer((host, port), make_handler) as httpd:
+            url = f"http://{host}:{port}/"
+            print(f"dev-decisions dashboard — {url}  (Ctrl-C to stop)")
+            if not no_open:
+                try:
+                    import webbrowser
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                print("\nstopped")
+                return EXIT_OK
+    except OSError as e:
+        print(f"error: dashboard failed to start: {e}", file=sys.stderr)
+        return EXIT_ERROR
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1945,7 +2990,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # classify-diff
     sp = sub.add_parser("classify-diff", help="Classify staged diff with Decide/Jev")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
                     help="Override config provider (local uses existing /private/tmp/gliner-decide venv)")
     sp.add_argument("--task", default=None,
                     help="Task to run: change, commit_audit, deps_risk, docs_drift, api_drift (default: auto-detect from diff)")
@@ -1957,7 +3002,7 @@ def build_parser() -> argparse.ArgumentParser:
     # fleet-scan
     sp = sub.add_parser("fleet-scan", help="Scan fleet for API drift across repos")
     sp.add_argument("--root", default=None, help="Directory to scan (default: ~/Projects)")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default="local",
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default="local",
                     help="Provider to use (local recommended for fleet)")
     sp.add_argument("--task", default="api_drift", help="Task to run (default: api_drift)")
     sp.set_defaults(func=cmd_fleet_scan)
@@ -1965,7 +3010,7 @@ def build_parser() -> argparse.ArgumentParser:
     # pr-gate
     sp = sub.add_parser("pr-gate", help="Classify PR diff and apply labels")
     sp.add_argument("branch", nargs="?", default=None, help="PR branch (default: current branch)")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them")
     sp.set_defaults(func=cmd_pr_gate)
@@ -1975,7 +3020,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("repo", nargs="?", default=None, help="Repo in owner/repo format (default: current)")
     sp.add_argument("--state", default="open", help="Issue state: open, closed, all")
     sp.add_argument("--limit", type=int, default=10, help="Max issues to classify")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them (default)")
     sp.set_defaults(func=cmd_triage_issues)
@@ -1984,7 +3029,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("changelog", help="Generate Keep-a-Changelog markdown since a ref")
     sp.add_argument("--since", required=True, help="Git ref (tag/commit) to start from")
     sp.add_argument("--next-version", default="Unreleased", help="Version header (default: Unreleased)")
-    sp.add_argument("--provider", choices=["decide", "jev", "local", "both"], default=None,
+    sp.add_argument("--provider", choices=["decide", "jev", "local", "modernbert", "both"], default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--write", action="store_true", help="Write/append to CHANGELOG.md")
     sp.set_defaults(func=cmd_changelog)
@@ -2020,6 +3065,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, help="Last N entries")
     sp.add_argument("--format", choices=["text", "json"], default="text")
     sp.set_defaults(func=cmd_log)
+
+    # feedback — calibration ground truth
+    sp = sub.add_parser("feedback", help="Record human feedback for a previous classification")
+    sp.add_argument("input_sha256", help="Input hash from a previous classify-diff/log entry")
+    sp.add_argument("--task", required=True, help="Task name (e.g. change, deps_risk)")
+    sp.add_argument("--label", required=True, help="Correct label (ground truth)")
+    sp.add_argument("--provider", default=None, help="Provider tag (e.g. decide, local, modernbert_raw)")
+    sp.add_argument("--note", default=None, help="Optional free-text note")
+    sp.set_defaults(func=cmd_feedback)
+
+    # dashboard — live local monitoring
+    sp = sub.add_parser("dashboard", help="Start local dashboard for provider telemetry")
+    sp.add_argument("--port", type=int, default=8765, help="Port to bind (default: 8765)")
+    sp.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    sp.add_argument("--days", type=int, default=7, help="Lookback window in days (default: 7)")
+    sp.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
+    sp.set_defaults(func=cmd_dashboard)
 
     # config
     sp = sub.add_parser("config", help="Show effective config")

@@ -58,9 +58,18 @@ Use this when onboarding a new machine, after cloning a batch of repos, or when 
 | Job | Model | Why |
 |---|---|---|
 | Diff classification, offline / no API cost | **GLiNER2 local** (`/private/tmp/gliner-decide`) | Free, private, zero-latency for small diffs |
-| Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
-| Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
+| Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity; **live catalog prices it at $0.15/$0.15 per 1M**, not the $0.03/$0 on the docs page — verify before quoting costs |
+| Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul wire shape is documented; $0.042/M input, output free; **Decision Index 0.2 (independent, 40 benchmarks)** scores it 51.67 vs Decide's 9.98 |
 | Agreement / confidence gating | **both** / `local+decide` / `local+jev` | Capture disagreements for calibration |
+
+## Provider facts (verified 2026-09-27)
+
+- **Jev confidence is a distribution-shape statistic, not raw max probability.** For N options the docs-state approximation is `(N × max_prob − 1) / (N − 1)`. Binary collapses to max; 3+ diverges. Do not treat `confidence == probabilities[winner]` in code — they are different numbers with different semantics.
+- **Jev is trained with RLCD — Reinforcement Learning for Calibrated Decisions** (not "reinforcement contrastive distillation"). No RLCD paper exists; TypeSafe has published an objective and data source but not the method.
+- **Hosted Decide does not support constrained classification** (`GET /v1/base-models` shows `encoder_features: ["classifications","entities","relations","structures"]` only). Cross-task rules are only reachable via the local `Classifier` path or by hosting `fastino/gliner2.5-multi-v1` instead.
+- **Hosted Decide description-map labels are rejected.** The API takes flat `labels` arrays only; embed rubric descriptions in the task prose. The open-source SDK silently drops dict labels on the hosted path.
+- **Warming on Fastino is HTTP 425, not a `model_warming` field.** The old `is_warmup` field is removed. Retry 425/429/503 with `Retry-After`, set read timeout ≥300 s.
+- **GLiNER2.5-Decide is a SpanExtractor despite the "2.5" name** (fine-tuned from `gliner2-large-v1`, max_width 8, DeBERTa-v3-large). Only `GLiNER2.5-multi-Decide` and pure `gliner2.5-*` models use the boundary architecture. Its safetensors reports 486,444,053 params; Fastino's headline "340M" omits embedding tables.
 
 ## Task registry
 
@@ -93,7 +102,7 @@ Local GLiNER (same heads as Decide, via existing `/private/tmp/gliner-decide` ve
 - `diff_type`: feat / fix / refactor / docs / test / chore
 - `risk`: low / medium / high
 
-Both providers return confidence. The JEV-as-a-Judge paper's finding applies: **confidence is an escalation signal, not a certificate**. Default floor is 0.7; null/declined verdicts always escalate.
+Both providers return confidence. The JEV-as-a-Judge paper's finding applies: **confidence is an escalation signal, not a certificate**. Default floor is 0.7; null/declined verdicts always escalate. But the two providers' confidences mean different things — Jev's is the concentration statistic `(N × max_prob − 1) / (N − 1)` (not raw max probability), while Decide returns the winning label's probability directly. **Do not threshold them at the same number without local calibration**; the CMU paper measured AUROC 0.869/0.745/0.863 for Jev across workloads, meaning the *ordering* of confidences is meaningful but the *absolute* number is not transferable — fit per-provider per-head floors from the JSONL log.
 
 ## PR gating
 

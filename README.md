@@ -2,7 +2,7 @@
 
 Decision-model gates for git + ZCode workflows. Scans secrets/PII from commits, classifies diffs using multiple providers, and logs every decision to JSONL for calibration.
 
-**v0.2.0** — PR gating, issue triage, changelog generation, ZCode agent routing with destructive-command detection.
+**v0.3.0** — provider telemetry, live dashboard, feedback loop for calibration, ModernBERT eval provider.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Three layers, each independently useful:
 | **ZCode hook** | `PreToolUse` on Bash → blocks agent-run `git commit`/`git push` if scan/classify fails | Automatic, global (opt-in) |
 | **CLI** | All subcommands, invocable from ZCode skill or terminal | On-demand |
 
-Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the calibration dataset.
+Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` is the calibration dataset.
 
 ![dev-decisions architecture](docs/architecture.svg)
 
@@ -25,6 +25,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the 
 | Diff classification, offline / no API cost | **GLiNER2 local** | Free, private, zero-latency |
 | Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
+| Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
 
 ## Local GLiNER setup
 
@@ -50,7 +51,22 @@ Point the CLI at a different venv or model in config:
 [providers]
 local_venv = "/private/tmp/gliner-decide"
 local_model = "fastino/GLiNER2.5-Decide"
+modernbert_model = "answerdotai/ModernBERT-base"
 ```
+
+## ModernBERT eval provider
+
+ModernBERT runs as a **sentence encoder** inside the same uv venv. It encodes the diff once, then scores each candidate label by cosine similarity against the label's standalone embedding. No fine-tuning — this is calibration data collection.
+
+```bash
+# Run ModernBERT on a diff
+dev-decisions classify-diff --provider modernbert --task change
+
+# Fleet scan with ModernBERT
+dev-decisions fleet-scan --provider modernbert
+```
+
+Results are logged with provider tag `modernbert_raw` so they can be filtered from production metrics. The inline script captures `all_scores`, `top2_gap`, and `embedding_norm` per head — these are the signals that tell you what fine-tuning would need to improve.
 
 ## Task registry
 
@@ -68,6 +84,36 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `safety` | `zcode-gate` destructive patterns | Destructive + reversible |
 
 ![v0.2.0 workflows](docs/workflows.svg)
+
+## Telemetry and dashboard
+
+Every provider call now emits structured telemetry: latency, error kind, token usage (Decide), noul/null rates (Jev/local), top2-gap and embedding norm (ModernBERT). All signals flow into the JSONL log.
+
+```bash
+# Start the live local dashboard
+dev-decisions dashboard --port 8765
+
+# Open http://localhost:8765 to see:
+#   - provider health (calls, errors, latency p50/p95 + latency distribution histogram)
+#   - confidence histograms per provider (coarse 6-bin + fine 20-bin spread)
+#   - ModernBERT signals (top2-gap spread + embedding-norm spread histograms)
+#   - cross-provider agreement matrix
+#   - calibration curves (once you add feedback)
+```
+
+## Feedback loop (calibration ground truth)
+
+The dashboard shows confidence distributions, but the only way to know if a provider is *correct* is to record human feedback:
+
+```bash
+# After a classify-diff run, find the input_sha256 in the log:
+dev-decisions log --format json | jq -r '.[-1].input_sha256'
+
+# Record the correct label:
+dev-decisions feedback <sha> --task change --label fix --provider modernbert_raw --note "clear typo fix"
+```
+
+The dashboard joins feedback with events on `(input_sha256, task)` to compute confidence-vs-correctness curves per provider. This is the signal that drives fine-tuning decisions: if ModernBERT's high-confidence predictions are wrong more often than Decide's, the encoder needs training.
 
 ## Install
 
@@ -130,6 +176,12 @@ dev-decisions fleet-scan --root ~/Projects --provider local
 # View decision log (your calibration dataset)
 dev-decisions log --tail 20
 dev-decisions log --format json > calibration.jsonl
+
+# Record human feedback for calibration
+dev-decisions feedback <sha> --task change --label fix --provider modernbert_raw
+
+# Start the live telemetry dashboard
+dev-decisions dashboard --port 8765
 
 # Show the effective merged config (defaults ← global ← repo ← env)
 dev-decisions config
@@ -267,11 +319,30 @@ Repo-local `.dev-decisions.toml` supports one extra flag: `[repo] sensitive = tr
   "labels": ["bug", "feature"],
   "destructive": true,
   "reversible": "no",
-  "advisory_only": true
+  "advisory_only": true,
+  "telemetry": {
+    "decide": {
+      "latency_ms": 820,
+      "http_status": 200,
+      "retries": 0,
+      "token_prompt": 512,
+      "token_completion": 128,
+      "token_total": 640,
+      "structured_ok": true
+    },
+    "modernbert_raw": {
+      "latency_ms": 7800,
+      "error_kind": null,
+      "top2_gap": 0.12,
+      "embedding_norm": 1.0
+    }
+  }
 }
 ```
 
 New fields in v0.2.0: `task`, `labels`, `destructive`, `reversible`, `advisory_only`.
+
+New fields in v0.3.0: `telemetry` (per-provider dict with latency, error_kind, token usage, structured_ok, top2_gap, embedding_norm, null_label_count, noul_count). Feedback records go to `logs/feedback/feedback.jsonl` and are joined on `input_sha256` + `task` for calibration curves.
 
 ## Calibration loop
 
