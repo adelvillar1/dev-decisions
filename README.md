@@ -22,8 +22,8 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 
 | Job | Model | Why |
 |---|---|---|
-| Diff classification, offline / no API cost | **GLiNER2.5-Decide** (`local`) | Free, private, zero-latency |
-| Diff classification, zero infra | **Decide / Fastino API** (`decide`) | Hosted, fast, declines on ambiguity |
+| Diff classification (default) | **GLiNER2.5-Decide** (`local`) | Free, private, zero-latency — the fastino model via sys1, no API key |
+| Diff classification fallback | **Decide / hosted Fastino wire** (`decide`) | Hosted api.fastino.ai; needs `FASTINO_API_KEY`. Note: `decide` is the hosted *wire* — the Decide *model* is what `local` runs |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
 | Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
 
@@ -40,9 +40,17 @@ dashboard (`GET /dashboard` on the sys1 service, port 8400), then point its
 `optin`, or `candidates` as fan-out tokens. `dev-decisions providers`-style
 inspection lives in the sys1 CLI: `sys1 providers --all`, `sys1 doctor`.
 
-## Local GLiNER2.5-Decide setup
+## Local GLiNER2.5-Decide setup (the default provider)
 
-The `local` provider runs `fastino/GLiNER2.5-Decide` in a standalone uv venv (default `/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive repos. `/private/tmp` is wiped on reboot; move it elsewhere via `providers.local_venv` if you want it to survive.
+The `local` provider — the default — runs `fastino/GLiNER2.5-Decide` through
+`sys1` using the fastino-prescribed classification API (one decode for all
+heads, full probabilities), in a standalone uv venv (default
+`/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive
+repos. `/private/tmp` is wiped on reboot; move it elsewhere via
+`providers.local_venv` if you want it to survive. For a load-once server
+(recommended: ~10s model load per call → ~150ms steady-state), see
+`service/classifier_server.py` in the sys1 repo and set
+`providers.local_server_url`.
 
 ```bash
 # 1. Create the venv (Python ≤ 3.12 — GLiNER2 needs torch that 3.13/3.14 lack)
@@ -164,10 +172,10 @@ dev-decisions status
 dev-decisions scan-staged
 dev-decisions scan-staged --deep   # PII span model (fully local)
 
-# Classify a diff (choose provider)
-dev-decisions classify-diff --provider decide
+# Classify a diff (default: local fastino GLiNER2.5-Decide via sys1)
+dev-decisions classify-diff
+dev-decisions classify-diff --provider decide   # hosted fallback (FASTINO_API_KEY)
 dev-decisions classify-diff --provider jev
-dev-decisions classify-diff --provider local
 dev-decisions classify-diff --task deps_risk   # explicit task
 dev-decisions classify-diff --allow-vendor     # one-off vendor call on a sensitive repo
 

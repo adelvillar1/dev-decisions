@@ -7,19 +7,26 @@ warn_on_pii = true
 max_diff_chars = 12000
 
 [classify]
-provider = "decide"          # decide | jev | local | both
+# `local` is the default: the fastino GLiNER2.5-Decide model served by sys1
+# (classifier server or venv subprocess) — offline, free, no API key.
+provider = "local"           # local | decide | jev | both
 block_on_classification = false
 confidence_floor = 0.7
 escalate_on_null = true
 allow_vendor_on_sensitive = false
 
 [providers]
+# Hosted fallbacks (not on the default path): `decide` is the hosted Fastino
+# wire; the Decide MODEL is what `local` runs via sys1.
 decide_api_url = "https://api.fastino.ai/v1/chat/completions"
-decide_model = "fastino/GLiNER-2.5-Decide"
+decide_model = "fastino/GLiNER2.5-Decide"
 jev_api_url = "https://api.typesafe.ai/v1/systemone"
 jev_model = "jev-1.13.0"
 local_venv = "/private/tmp/gliner-decide"
 local_model = "fastino/GLiNER2.5-Decide"
+# Optional load-once classifier server (recommended; see sys1's
+# service/classifier_server.py — one server per model, own port):
+# local_server_url = "http://127.0.0.1:8414"
 request_timeout_seconds = 30
 max_retries = 2
 retry_backoff_seconds = 5

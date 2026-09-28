@@ -367,7 +367,10 @@ DEFAULTS: dict = {
         "max_diff_chars": DEFAULT_MAX_DIFF_CHARS,
     },
     "classify": {
-        "provider": "decide",        # decide | jev | both
+        # `local` is the default: the fastino GLiNER2.5-Decide model served by
+        # sys1 (classifier server or venv subprocess) — offline, free, no API
+        # key. Hosted `decide` (api.fastino.ai) is the fallback, not the focus.
+        "provider": "local",         # local | decide | jev | both
         "block_on_classification": False,
         "confidence_floor": 0.7,
         "escalate_on_null": True,
@@ -1208,34 +1211,45 @@ def _call_local_provider(diff: str, heads: list[dict], cfg: dict, telemetry: dic
         raise RuntimeError(f"Local GLiNER venv not found at {venv_python}")
 
     # Build the inline script that runs inside the venv
-    tasks_json = json.dumps({h["task"][:40]: h for h in heads})
+    tasks_json = json.dumps({h["task"][:40]: h["labels"] for h in heads})
     inline = f'''
-import json, sys, io, contextlib
-from gliner2 import GLiNER2
+import json, sys, io
 
 # Suppress model init banner
 old_stdout = sys.stdout
 sys.stdout = io.StringIO()
 
-model = GLiNER2.from_pretrained({cfg["providers"]["local_model"]!r})
+from gliner2.classification import ClassificationConfig, ClassificationSchema, Classifier
+
+model_name = {cfg["providers"]["local_model"]!r}
 text = sys.argv[1]
 tasks = json.loads(sys.argv[2])
-results = {{}}
-for tid, task in tasks.items():
-    r = model.classify_text(text, tasks={{"label": task["labels"]}}, include_confidence=True)
-    entry = {{}}
-    if isinstance(r, dict):
-        inner = r.get("label") or r
-        if isinstance(inner, dict):
-            entry["label"] = inner.get("label")
-            entry["confidence"] = inner.get("confidence")
-        else:
-            entry["label"] = str(inner)
-    results[tid] = entry
+
+# Fastino-prescribed usage (gliner25-decide-playground/model.py): one
+# ClassificationSchema holding every task, one decode, independent decoder —
+# the same surface sys1's local wire uses, so the two agree.
+schema = ClassificationSchema()
+for name, labels in tasks.items():
+    schema.single(name, labels)
+clf = Classifier.from_pretrained(model_name, map_location="cpu")
+result = clf.classify(text, schema, config=ClassificationConfig(decoder="independent", on_infeasible="relax"))
+
+out = {{}}
+for name in tasks:
+    try:
+        value = result.value(name)
+        probs = result.probabilities(name)
+    except Exception:
+        continue  # task absent from the result -> missing below
+    labels = list(value) if isinstance(value, (list, tuple)) else [value]
+    out[name] = {{
+        "label": str(labels[0]) if labels else None,
+        "confidence": max(probs.values()) if probs else None,
+    }}
 
 # Restore stdout and print only the JSON result
 sys.stdout = old_stdout
-print(json.dumps(results))
+print(json.dumps(out))
 '''
 
     t0 = time.monotonic()
@@ -1737,8 +1751,8 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
     pre_commit_cmd = cfg["hooks"]["pre_commit"]
     pre_push_cmd = cfg["hooks"]["pre_push"]
 
-    ok &= write_hook("pre-commit", f'exec "$HOME/.local/bin/dev-decisions" scan-staged --trigger git-pre-commit')
-    ok &= write_hook("pre-push", f'exec "$HOME/.local/bin/dev-decisions" classify-diff --trigger git-pre-push')
+    ok &= write_hook("pre-commit", f'exec "$HOME/.local/bin/dev-decisions" {pre_commit_cmd} --trigger git-pre-commit')
+    ok &= write_hook("pre-push", f'exec "$HOME/.local/bin/dev-decisions" {pre_push_cmd} --trigger git-pre-push')
 
     if ok:
         print(f"Hooks installed in {hooks_path}")
@@ -1765,21 +1779,28 @@ def cmd_remove_hooks(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _discover_repos(root: Path) -> list[Path]:
-    """Find git repos one level deep under root (non-recursive past that)."""
+def _discover_repos(root: Path, max_depth: int = 5) -> list[Path]:
+    """Find git repos under root, descending up to max_depth levels."""
     repos: list[Path] = []
     if not root.is_dir():
         return repos
-    for child in sorted(root.iterdir()):
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        if (child / ".git").is_dir():
-            repos.append(child)
-        else:
-            # one extra level for nested project layouts
-            for grandchild in sorted(child.iterdir()):
-                if grandchild.is_dir() and (grandchild / ".git").is_dir():
-                    repos.append(grandchild)
+
+    def _walk(path: Path, depth: int) -> None:
+        if depth >= max_depth:
+            return
+        try:
+            children = sorted(path.iterdir())
+        except (PermissionError, OSError):
+            return
+        for child in children:
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if (child / ".git").is_dir():
+                repos.append(child)
+            else:
+                _walk(child, depth + 1)
+
+    _walk(root, 0)
     return repos
 
 
@@ -1879,14 +1900,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             ptype = "other"
         print(f"  {repo.name:<32} {hooks:<8} {sensitive:<10} {has_env:<6} {ptype:<10}")
     return EXIT_OK
-
-
-def _find_result_by_prefix(result: dict, prefix: str) -> dict:
-    """Find the first result key that starts with `prefix` (handles task[:40] truncation)."""
-    for key in result:
-        if key.startswith(prefix):
-            return result[key]
-    return {}
 
 
 def cmd_fleet_scan(args: argparse.Namespace) -> int:
@@ -2981,6 +2994,10 @@ class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _today_events_path(self) -> Path:
+        """Return the expected events.jsonl path for today (UTC)."""
+        return self._base / datetime.now(timezone.utc).strftime("%Y/%m/%d") / "events.jsonl"
+
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self.send_response(200)
@@ -2990,11 +3007,11 @@ class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(_DASHBOARD_HTML.encode())
             return
         if self.path.startswith("/api/summary"):
-            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
+            records = self._filter_days(self._read_jsonl(self._today_events_path()))
             # fallback: read all dated dirs
-            if not records and (self._base / "2026").exists():
+            if not records and self._base.exists():
                 all_records = []
-                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                for p in sorted(self._base.rglob("events.jsonl")):
                     all_records.extend(self._read_jsonl(p.relative_to(self._base)))
                 records = self._filter_days(all_records)
             providers = {}
@@ -3040,10 +3057,10 @@ class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._json({"providers": provider_list})
             return
         if self.path.startswith("/api/confidence"):
-            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
-            if not records and (self._base / "2026").exists():
+            records = self._filter_days(self._read_jsonl(self._today_events_path()))
+            if not records and self._base.exists():
                 all_records = []
-                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                for p in sorted(self._base.rglob("events.jsonl")):
                     all_records.extend(self._read_jsonl(p.relative_to(self._base)))
                 records = self._filter_days(all_records)
             providers = {}
@@ -3070,10 +3087,10 @@ class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._json({"providers": provider_list})
             return
         if self.path.startswith("/api/modernbert"):
-            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
-            if not records and (self._base / "2026").exists():
+            records = self._filter_days(self._read_jsonl(self._today_events_path()))
+            if not records and self._base.exists():
                 all_records = []
-                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                for p in sorted(self._base.rglob("events.jsonl")):
                     all_records.extend(self._read_jsonl(p.relative_to(self._base)))
                 records = self._filter_days(all_records)
             tasks = {}
@@ -3124,10 +3141,10 @@ class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._json({"tasks": task_list})
             return
         if self.path.startswith("/api/agreement"):
-            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
-            if not records and (self._base / "2026").exists():
+            records = self._filter_days(self._read_jsonl(self._today_events_path()))
+            if not records and self._base.exists():
                 all_records = []
-                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                for p in sorted(self._base.rglob("events.jsonl")):
                     all_records.extend(self._read_jsonl(p.relative_to(self._base)))
                 records = self._filter_days(all_records)
             pairs = {}
@@ -3153,10 +3170,10 @@ class _DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/calibration"):
             feedback = self._filter_days(self._read_jsonl(Path("feedback") / "feedback.jsonl"))
-            records = self._filter_days(self._read_jsonl(Path("2026") / "09" / "26" / "events.jsonl"))
-            if not records and (self._base / "2026").exists():
+            records = self._filter_days(self._read_jsonl(self._today_events_path()))
+            if not records and self._base.exists():
                 all_records = []
-                for p in sorted((self._base / "2026").rglob("events.jsonl")):
+                for p in sorted(self._base.rglob("events.jsonl")):
                     all_records.extend(self._read_jsonl(p.relative_to(self._base)))
                 records = self._filter_days(all_records)
             index = {}
