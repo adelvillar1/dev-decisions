@@ -51,16 +51,24 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the 
 
 `bulk-install` installs hooks in every repo under the root. Sensitive repos get flagged with `[sensitive]`. Skips already-installed repos unless `--force`.
 
-Use this when onboarding a new machine, after cloning a batch of repos, or when adding a project to your `~/Projects` directory.
+### New project setup (run for every new/cloned repo)
+
+1. `dev-decisions install-hooks <repo>` — installs pre-commit (scan-staged, local, no keys) and pre-push (classify-diff) from `hooks.*` config. Hooks source the machine-global key file, so a fresh repo needs no per-repo config.
+2. Keys: one file, `~/.config/dev-decisions/env` (`chmod 600`, `FASTINO_API_KEY=...` / `TYPESAFE_API_KEY=...` lines) — created once per machine; `install-hooks` wires every managed hook to source it with `set -a`. Never commit it, never put keys in the hook file itself.
+3. Nothing else. The hook classifies every push through sys1's `decide` provider; without keys it degrades to warn-and-proceed (fail-open by design); sensitive repos skip vendor calls unless `--allow-vendor`.
+
+Use this when onboarding a new machine (keys file + `bulk-install`), after cloning a batch of repos, or when adding a project to your `~/Projects` directory.
 
 ## Provider routing
 
-| Job | Model | Why |
+**Active-provider policy (2026-09-28): hosted Fastino (`decide`) and TypeSafe Jev (`jev`) are the only active providers.** Local GLiNER is supported by design but not encouraged (its wire drops head instructions; nothing critical relies on it). Additional hosted APIs are explored before inclusion.
+
+| Job | Provider | Why |
 |---|---|---|
-| Diff classification, offline / no API cost | **GLiNER2 local** (`/private/tmp/gliner-decide`) | Free, private, zero-latency for small diffs |
-| Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity; **live catalog prices it at $0.15/$0.15 per 1M**, not the $0.03/$0 on the docs page — verify before quoting costs |
-| Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul wire shape is documented; $0.042/M input, output free; **Decision Index 0.2 (independent, 40 benchmarks)** scores it 51.67 vs Decide's 9.98 |
-| Agreement / confidence gating | **both** / `local+decide` / `local+jev` | Capture disagreements for calibration |
+| Diff classification (default) | **decide** — hosted Fastino API (`fastino/GLiNER2.5-Decide` via sys1) | The active fastino provider; fast, declines on ambiguity; the `decide` id means the HOSTED wire — the Decide model is what `local` runs |
+| Calibrated judgments, multi-question | **jev** (`jev-1.13.0`) | Choice/Score/Noul wire shape is documented; $0.042/M input, output free; **Decision Index 0.2 (independent, 40 benchmarks)** scores it 51.67 vs Decide's 9.98 |
+| Offline / private repos only | **local** (supported, not encouraged) | Same Decide model offline; use for sensitive repos instead of `--allow-vendor` |
+| Agreement / confidence gating | **both** (`decide+jev` via sys1) | Capture disagreements for calibration |
 
 ## Provider facts (verified 2026-09-27)
 
