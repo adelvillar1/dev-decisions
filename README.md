@@ -22,8 +22,8 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 
 | Job | Model | Why |
 |---|---|---|
-| Diff classification, offline / no API cost | **fastino/GLiNER2.5-Decide** (`local`) | Free, private, zero-latency |
-| Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
+| Diff classification, offline / no API cost | **GLiNER2.5-Decide** (`local`) | Free, private, zero-latency |
+| Diff classification, zero infra | **Decide / Fastino API** (`decide`) | Hosted, fast, declines on ambiguity |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
 | Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
 
