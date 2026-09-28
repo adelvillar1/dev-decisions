@@ -1211,7 +1211,7 @@ def _call_local_provider(diff: str, heads: list[dict], cfg: dict, telemetry: dic
         raise RuntimeError(f"Local GLiNER venv not found at {venv_python}")
 
     # Build the inline script that runs inside the venv
-    tasks_json = json.dumps({h["task"][:40]: h["labels"] for h in heads})
+    tasks_json = json.dumps({h["task"][:40]: {"labels": h.get("labels", []), "instruction": h["task"]} for h in heads})
     inline = f'''
 import json, sys, io
 
@@ -1227,10 +1227,11 @@ tasks = json.loads(sys.argv[2])
 
 # Fastino-prescribed usage (gliner25-decide-playground/model.py): one
 # ClassificationSchema holding every task, one decode, independent decoder —
-# the same surface sys1's local wire uses, so the two agree.
+# the same surface sys1's local wire uses, so the two agree. instruction
+# carries the head's question text; without it the model only sees labels.
 schema = ClassificationSchema()
-for name, labels in tasks.items():
-    schema.single(name, labels)
+for name, spec in tasks.items():
+    schema.single(name, spec["labels"], instruction=spec.get("instruction"))
 clf = Classifier.from_pretrained(model_name, map_location="cpu")
 result = clf.classify(text, schema, config=ClassificationConfig(decoder="independent", on_infeasible="relax"))
 
