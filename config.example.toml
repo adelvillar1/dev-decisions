@@ -31,6 +31,9 @@ request_timeout_seconds = 30
 max_retries = 2
 retry_backoff_seconds = 5
 
+# Git hooks don't inherit your shell env — put provider keys in
+# ~/.config/dev-decisions/env (one KEY=value per line, chmod 600) and
+# install-hooks wires them into every managed hook.
 [hooks]
 pre_commit = "scan-staged"
 pre_push = "classify-diff"

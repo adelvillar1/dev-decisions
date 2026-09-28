@@ -40,6 +40,21 @@ dashboard (`GET /dashboard` on the sys1 service, port 8400), then point its
 `optin`, or `candidates` as fan-out tokens. `dev-decisions providers`-style
 inspection lives in the sys1 CLI: `sys1 providers --all`, `sys1 doctor`.
 
+## API keys for git hooks
+
+Git hooks don't inherit your shell environment. `install-hooks` wires every
+hook it manages to source an optional key file:
+
+```bash
+# ~/.config/dev-decisions/env  (chmod 600; one KEY=value per line)
+FASTINO_API_KEY=...
+TYPESAFE_API_KEY=...
+```
+
+With `FASTINO_API_KEY` present, `pre-push` (classify-diff) reaches the
+hosted Fastino API; without it the hook warns and proceeds (fail-open by
+design). `pre-commit` (scan-staged) is fully local and needs no keys.
+
 ## Local GLiNER2.5-Decide setup (supported by design, not encouraged)
 
 The `local` provider runs `fastino/GLiNER2.5-Decide` through

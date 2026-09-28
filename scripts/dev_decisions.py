@@ -1737,6 +1737,10 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
         hook_file = hooks_path / name
         content = f"""#!/bin/sh
 {marker}
+# Provider API keys (git hooks don't inherit your shell env). Create
+# ~/.config/dev-decisions/env with `FASTINO_API_KEY=...` lines and
+# install-hooks wires it into every hook it manages.
+[ -f "$HOME/.config/dev-decisions/env" ] && {{ set -a; . "$HOME/.config/dev-decisions/env"; set +a; }}
 {cmd_template}
 """
         if hook_file.exists() and marker not in hook_file.read_text(errors="replace"):
