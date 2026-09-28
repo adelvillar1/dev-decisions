@@ -22,7 +22,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 
 | Job | Model | Why |
 |---|---|---|
-| Diff classification, offline / no API cost | **GLiNER2 local** | Free, private, zero-latency |
+| Diff classification, offline / no API cost | **fastino/GLiNER2.5-Decide** (`local`) | Free, private, zero-latency |
 | Diff classification, zero infra | **Decide** (`fastino/GLiNER-2.5-Decide`) | Fast, declines on ambiguity |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
 | Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
@@ -40,9 +40,9 @@ dashboard (`GET /dashboard` on the sys1 service, port 8400), then point its
 `optin`, or `candidates` as fan-out tokens. `dev-decisions providers`-style
 inspection lives in the sys1 CLI: `sys1 providers --all`, `sys1 doctor`.
 
-## Local GLiNER setup
+## Local GLiNER2.5-Decide setup
 
-The `local` provider runs GLiNER2 in a standalone uv venv (default `/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive repos. `/private/tmp` is wiped on reboot; move it elsewhere via `providers.local_venv` if you want it to survive.
+The `local` provider runs `fastino/GLiNER2.5-Decide` in a standalone uv venv (default `/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive repos. `/private/tmp` is wiped on reboot; move it elsewhere via `providers.local_venv` if you want it to survive.
 
 ```bash
 # 1. Create the venv (Python ≤ 3.12 — GLiNER2 needs torch that 3.13/3.14 lack)
