@@ -22,8 +22,8 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 
 | Job | Model | Why |
 |---|---|---|
-| Diff classification (default) | **GLiNER2.5-Decide** (`local`) | Free, private, zero-latency — the fastino model via sys1, no API key |
-| Diff classification fallback | **Decide / hosted Fastino wire** (`decide`) | Hosted api.fastino.ai; needs `FASTINO_API_KEY`. Note: `decide` is the hosted *wire* — the Decide *model* is what `local` runs |
+| Diff classification (default) | **Decide — hosted Fastino API** (`decide`) | The active fastino provider; fast, declines on ambiguity |
+| Diff classification (offline) | **GLiNER2.5-Decide** (`local`) | Same Decide model offline via sys1 — supported by design, **not encouraged** |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
 | Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
 
@@ -40,9 +40,9 @@ dashboard (`GET /dashboard` on the sys1 service, port 8400), then point its
 `optin`, or `candidates` as fan-out tokens. `dev-decisions providers`-style
 inspection lives in the sys1 CLI: `sys1 providers --all`, `sys1 doctor`.
 
-## Local GLiNER2.5-Decide setup (the default provider)
+## Local GLiNER2.5-Decide setup (supported by design, not encouraged)
 
-The `local` provider — the default — runs `fastino/GLiNER2.5-Decide` through
+The `local` provider runs `fastino/GLiNER2.5-Decide` through
 `sys1` using the fastino-prescribed classification API (one decode for all
 heads, full probabilities), in a standalone uv venv (default
 `/private/tmp/gliner-decide`) — fully offline, free, and safe for sensitive

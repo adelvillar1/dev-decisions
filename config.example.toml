@@ -7,17 +7,17 @@ warn_on_pii = true
 max_diff_chars = 12000
 
 [classify]
-# `local` is the default: the fastino GLiNER2.5-Decide model served by sys1
-# (classifier server or venv subprocess) — offline, free, no API key.
-provider = "local"           # local | decide | jev | both
+# Active providers: hosted Fastino (`decide`) and TypeSafe (`jev`).
+# `local` is supported by design but not encouraged — offline/private repos.
+provider = "decide"          # decide | jev | local | both
 block_on_classification = false
 confidence_floor = 0.7
 escalate_on_null = true
 allow_vendor_on_sensitive = false
 
 [providers]
-# Hosted fallbacks (not on the default path): `decide` is the hosted Fastino
-# wire; the Decide MODEL is what `local` runs via sys1.
+# Hosted Fastino (`decide`) and TypeSafe (`jev`) are the active providers.
+# `local` runs the same Decide model offline via sys1 — supported, not encouraged.
 decide_api_url = "https://api.fastino.ai/v1/chat/completions"
 decide_model = "fastino/GLiNER2.5-Decide"
 jev_api_url = "https://api.typesafe.ai/v1/systemone"

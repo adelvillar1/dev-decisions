@@ -367,10 +367,10 @@ DEFAULTS: dict = {
         "max_diff_chars": DEFAULT_MAX_DIFF_CHARS,
     },
     "classify": {
-        # `local` is the default: the fastino GLiNER2.5-Decide model served by
-        # sys1 (classifier server or venv subprocess) — offline, free, no API
-        # key. Hosted `decide` (api.fastino.ai) is the fallback, not the focus.
-        "provider": "local",         # local | decide | jev | both
+        # Active providers: hosted Fastino (`decide`) and TypeSafe (`jev`).
+        # Local GLiNER is supported by design but not encouraged — offline /
+        # private-repo use only. See the sys1 provider policy (2026-09-28).
+        "provider": "decide",        # decide | jev | local | both
         "block_on_classification": False,
         "confidence_floor": 0.7,
         "escalate_on_null": True,
