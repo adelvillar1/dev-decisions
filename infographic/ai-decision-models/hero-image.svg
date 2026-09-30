@@ -1,0 +1,221 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 627" width="1200" height="627">
+  <defs>
+    <!-- Dark background gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0e17;stop-opacity:1"/>
+      <stop offset="50%" style="stop-color:#12182b;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#0d1420;stop-opacity:1"/>
+    </linearGradient>
+    <!-- Cyan glow -->
+    <radialGradient id="glow-cyan" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#00f0ff;stop-opacity:0.3"/>
+      <stop offset="100%" style="stop-color:#00f0ff;stop-opacity:0"/>
+    </radialGradient>
+    <!-- Purple glow -->
+    <radialGradient id="glow-purple" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#a855f7;stop-opacity:0.25"/>
+      <stop offset="100%" style="stop-color:#a855f7;stop-opacity:0"/>
+    </radialGradient>
+    <!-- Node gradients -->
+    <linearGradient id="node-jev" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#06b6d4"/>
+      <stop offset="100%" style="stop-color:#0891b2"/>
+    </linearGradient>
+    <linearGradient id="node-decide" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="node-local" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#059669"/>
+    </linearGradient>
+    <linearGradient id="node-moderbert" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#d97706"/>
+    </linearGradient>
+    <!-- Glow filter -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow-strong">
+      <feGaussianBlur stdDeviation="8" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- Grid pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(100,150,255,0.04)" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="627" fill="url(#bg)"/>
+  <rect width="1200" height="627" fill="url(#grid)"/>
+
+  <!-- Ambient glows -->
+  <ellipse cx="300" cy="250" rx="250" ry="200" fill="url(#glow-purple)"/>
+  <ellipse cx="900" cy="380" rx="200" ry="180" fill="url(#glow-cyan)"/>
+
+  <!-- Header -->
+  <text x="600" y="52" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="11" font-weight="600" fill="rgba(0,240,255,0.6)" letter-spacing="3">AI DECISION MODELS</text>
+  <text x="600" y="95" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="36" font-weight="700" fill="white">Smarter Git Commits</text>
+  <text x="600" y="125" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="18" font-weight="400" fill="rgba(255,255,255,0.5)">Multi-provider decision support for developer workflows</text>
+
+  <!-- Code input -->
+  <g transform="translate(80, 260)">
+    <rect x="0" y="0" width="100" height="50" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+    <text x="50" y="22" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="rgba(255,255,255,0.5)">git commit</text>
+    <text x="50" y="38" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="rgba(0,240,255,0.7)">--all</text>
+    <!-- Connection line to hub -->
+    <path d="M 100 25 Q 180 25 240 150" fill="none" stroke="rgba(0,240,255,0.15)" stroke-width="2" stroke-dasharray="8,4"/>
+  </g>
+
+  <!-- Central hub node -->
+  <g transform="translate(600, 410)">
+    <!-- Hub glow ring -->
+    <circle cx="0" cy="0" r="65" fill="none" stroke="rgba(0,240,255,0.08)" stroke-width="20"/>
+    <circle cx="0" cy="0" r="65" fill="none" stroke="rgba(168,85,247,0.08)" stroke-width="40"/>
+    <!-- Main hub circle -->
+    <circle cx="0" cy="0" r="55" fill="rgba(12,18,30,0.8)" stroke="rgba(0,240,255,0.4)" stroke-width="2" filter="url(#glow)"/>
+    <!-- Hub icon: brain/circuit -->
+    <path d="M-20,-15 Q-20,-25 -10,-25 Q0,-25 0,-15 Q0,-5 -10,-5 Q-20,-5 -20,-15 Z M-10,-15 L-10,10 M-15,0 L-5,0 M5,-15 Q5,-25 15,-25 Q20,-25 20,-15 Q20,-5 15,-5 Q5,-5 5,-15 Z M15,-15 L15,10 M10,0 L20,0 M-20,10 Q-10,15 0,10 Q10,15 20,10" fill="none" stroke="rgba(0,240,255,0.6)" stroke-width="1.5" filter="url(#glow)"/>
+    <text x="0" y="72" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16" font-weight="600" fill="white">DECISION</text>
+    <text x="0" y="88" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="12" fill="rgba(255,255,255,0.4)">ENGINE</text>
+  </g>
+
+  <!-- Connection lines from providers to hub -->
+  <!-- Jev line -->
+  <path d="M 365 195 Q 380 300 600 410" fill="none" stroke="rgba(6,182,212,0.3)" stroke-width="2"/>
+  <!-- Decide line -->
+  <path d="M 550 195 Q 560 300 600 410" fill="none" stroke="rgba(139,92,246,0.3)" stroke-width="2"/>
+  <!-- Local line -->
+  <path d="M 730 195 Q 660 300 600 410" fill="none" stroke="rgba(16,185,129,0.3)" stroke-width="2"/>
+  <!-- ModernBERT line -->
+  <path d="M 875 195 Q 740 300 600 410" fill="none" stroke="rgba(245,158,11,0.3)" stroke-width="2"/>
+
+  <!-- Output connections -->
+  <!-- Safe output line -->
+  <path d="M 600 410 Q 600 480 450 510" fill="none" stroke="rgba(16,185,129,0.3)" stroke-width="2"/>
+  <!-- Review output line -->
+  <path d="M 600 410 Q 600 480 600 510" fill="none" stroke="rgba(245,158,11,0.3)" stroke-width="2"/>
+  <!-- Escalate output line -->
+  <path d="M 600 410 Q 600 480 750 510" fill="none" stroke="rgba(239,68,68,0.3)" stroke-width="2"/>
+
+  <!-- Provider Node 1: Jev -->
+  <g transform="translate(365, 195)">
+    <rect x="-55" y="-50" width="110" height="100" rx="12" fill="rgba(6,182,212,0.08)" stroke="rgba(6,182,212,0.25)" stroke-width="1.5"/>
+    <!-- Brain icon -->
+    <path d="M-12,-12 Q-12,-20 -4,-20 Q4,-20 4,-12 Q4,-4 -4,-4 Q-12,-4 -12,-12 Z M4,-12 Q4,-20 12,-20 Q16,-20 16,-12 Q16,-4 12,-4 Q4,-4 4,-12 Z M-4,0 Q0,4 4,0 M-8,-4 L-8,4 M12,-4 L12,4 M-8,-8 L-8,-4 M12,-8 L12,-4" fill="none" stroke="#06b6d4" stroke-width="1.5" filter="url(#glow)"/>
+    <text x="0" y="8" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16" font-weight="600" fill="white">Jev</text>
+    <text x="0" y="22" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.5)">Calibrated</text>
+    <text x="0" y="34" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(6,182,212,0.7)">jev-1.13.0</text>
+  </g>
+
+  <!-- Provider Node 2: Decide -->
+  <g transform="translate(550, 195)">
+    <rect x="-55" y="-50" width="110" height="100" rx="12" fill="rgba(139,92,246,0.08)" stroke="rgba(139,92,246,0.25)" stroke-width="1.5"/>
+    <!-- Target icon -->
+    <circle cx="0" cy="-8" r="12" fill="none" stroke="#8b5cf6" stroke-width="1.5" filter="url(#glow)"/>
+    <circle cx="0" cy="-8" r="7" fill="none" stroke="#8b5cf6" stroke-width="1.5"/>
+    <circle cx="0" cy="-8" r="2.5" fill="#8b5cf6"/>
+    <text x="0" y="8" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16" font-weight="600" fill="white">Decide</text>
+    <text x="0" y="22" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.5)">Fastino API</text>
+    <text x="0" y="34" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(139,92,246,0.7)">GLiNER-2.5</text>
+  </g>
+
+  <!-- Provider Node 3: Local -->
+  <g transform="translate(730, 195)">
+    <rect x="-55" y="-50" width="110" height="100" rx="12" fill="rgba(16,185,129,0.08)" stroke="rgba(16,185,129,0.25)" stroke-width="1.5"/>
+    <!-- Lock icon -->
+    <rect x="-9" y="-16" width="18" height="12" rx="2" fill="none" stroke="#10b981" stroke-width="1.5" filter="url(#glow)"/>
+    <path d="M-5,-16 Q-5,-25 0,-25 Q5,-25 5,-16" fill="none" stroke="#10b981" stroke-width="1.5"/>
+    <circle cx="0" cy="-10" r="2" fill="#10b981"/>
+    <line x1="0" y1="-8" x2="0" y2="-5" stroke="#10b981" stroke-width="1.5"/>
+    <text x="0" y="8" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16" font-weight="600" fill="white">Local</text>
+    <text x="0" y="22" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.5)">Offline</text>
+    <text x="0" y="34" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(16,185,129,0.7)">Zero API cost</text>
+  </g>
+
+  <!-- Provider Node 4: ModernBERT -->
+  <g transform="translate(875, 195)">
+    <rect x="-55" y="-50" width="110" height="100" rx="12" fill="rgba(245,158,11,0.08)" stroke="rgba(245,158,11,0.25)" stroke-width="1.5"/>
+    <!-- Chart icon -->
+    <line x1="-15" y1="0" x2="-15" y2="-22" stroke="rgba(245,158,11,0.3)" stroke-width="1"/>
+    <line x1="-15" y1="0" x2="15" y2="0" stroke="rgba(245,158,11,0.3)" stroke-width="1"/>
+    <polyline points="-10,-5 -3,-18 3,-12 10,-20" fill="none" stroke="#f59e0b" stroke-width="2" filter="url(#glow)"/>
+    <text x="0" y="8" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="16" font-weight="600" fill="white">ModernBERT</text>
+    <text x="0" y="22" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.5)">Calibration</text>
+    <text x="0" y="34" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(245,158,11,0.7)">Raw embeddings</text>
+  </g>
+
+  <!-- Output labels -->
+  <g transform="translate(450, 510)">
+    <rect x="-65" y="-20" width="130" height="40" rx="20" fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.4)" stroke-width="1"/>
+    <text x="0" y="0" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" font-weight="600" fill="rgba(16,185,129,0.8)">Safe to Push</text>
+    <text x="0" y="12" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.4)">Proceed with confidence</text>
+  </g>
+
+  <g transform="translate(600, 520)">
+    <rect x="-65" y="-20" width="130" height="40" rx="20" fill="rgba(245,158,11,0.15)" stroke="rgba(245,158,11,0.4)" stroke-width="1"/>
+    <text x="0" y="0" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" font-weight="600" fill="rgba(245,158,11,0.8)">Needs Review</text>
+    <text x="0" y="12" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.4)">Low confidence</text>
+  </g>
+
+  <g transform="translate(750, 510)">
+    <rect x="-65" y="-20" width="130" height="40" rx="20" fill="rgba(239,68,68,0.15)" stroke="rgba(239,68,68,0.4)" stroke-width="1"/>
+    <text x="0" y="0" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13" font-weight="600" fill="rgba(239,68,68,0.8)">Escalate</text>
+    <text x="0" y="12" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.4)">High risk, get review</text>
+  </g>
+
+  <!-- Bottom stats bar -->
+  <g transform="translate(600, 575)">
+    <line x1="-350" y1="0" x2="350" y2="0" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <!-- Left stat -->
+    <g transform="translate(-280, 0)">
+      <text x="0" y="16" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="24" font-weight="700" fill="rgba(0,240,255,0.9)">4</text>
+      <text x="0" y="32" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.4)">Decision Models</text>
+    </g>
+    <!-- Center stat -->
+    <g transform="translate(0, 0)">
+      <text x="0" y="16" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="24" font-weight="700" fill="rgba(139,92,246,0.9)">135+</text>
+      <text x="0" y="32" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.4)">Tests Passing</text>
+    </g>
+    <!-- Right stat -->
+    <g transform="translate(280, 0)">
+      <text x="0" y="16" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="24" font-weight="700" fill="rgba(16,185,129,0.9)">100%</text>
+      <text x="0" y="32" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="10" fill="rgba(255,255,255,0.4)">Open Source</text>
+    </g>
+  </g>
+
+  <!-- Branding -->
+  <text x="1150" y="615" text-anchor="end" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="11" fill="rgba(255,255,255,0.3)">sys1.dev · dev-decisions</text>
+
+  <!-- Decorative particles -->
+  <circle cx="150" cy="120" r="1.5" fill="rgba(0,240,255,0.4)"/>
+  <circle cx="950" cy="150" r="2" fill="rgba(139,92,246,0.4)"/>
+  <circle cx="1050" cy="280" r="1.5" fill="rgba(16,185,129,0.4)"/>
+  <circle cx="200" cy="400" r="2" fill="rgba(0,240,255,0.3)"/>
+  <circle cx="1100" cy="450" r="1.5" fill="rgba(245,158,11,0.4)"/>
+  <circle cx="120" cy="550" r="2" fill="rgba(139,92,246,0.3)"/>
+  <circle cx="850" cy="100" r="1" fill="rgba(0,240,255,0.5)"/>
+  <circle cx="400" cy="560" r="1.5" fill="rgba(16,185,129,0.3)"/>
+
+  <!-- Scan lines effect -->
+  <line x1="0" y1="15" x2="1200" y2="15" stroke="rgba(0,240,255,0.03)" stroke-width="30"/>
+  <line x1="0" y1="105" x2="1200" y2="105" stroke="rgba(139,92,246,0.03)" stroke-width="40"/>
+  <line x1="0" y1="315" x2="1200" y2="315" stroke="rgba(16,185,129,0.02)" stroke-width="60"/>
+
+  <!-- Top glow accent -->
+  <rect x="420" y="0" width="360" height="3" rx="1.5" fill="rgba(0,240,255,0.3)" filter="url(#glow-strong)"/>
+  <rect x="480" y="0" width="240" height="3" rx="1.5" fill="rgba(139,92,246,0.4)" filter="url(#glow-strong)"/>
+
+  <!-- Version badge -->
+  <rect x="1120" y="30" width="50" height="18" rx="9" fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.3)" stroke-width="1"/>
+  <text x="1145" y="42" text-anchor="middle" font-family="'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="9" font-weight="600" fill="rgba(16,185,129,0.8)">v0.3.0</text>
+</svg>
