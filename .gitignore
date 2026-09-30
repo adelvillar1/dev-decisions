@@ -7,3 +7,6 @@ venv/
 *.log
 .DS_Store
 .zcode/
+# ZCode plugin caches / marker files (auto-regenerated locally)
+.v2c/
+.video_agent/
