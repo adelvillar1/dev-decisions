@@ -535,6 +535,100 @@ def effective_diff(repo: Path, max_chars: int = DEFAULT_MAX_DIFF_CHARS) -> str:
     return last_commit_diff(repo, max_chars)
 
 
+ZERO_SHA = "0" * 40
+# Well-known SHA-1 of git's empty tree; used as the base when a first push
+# starts at a root commit. Only SHA-1 repos hit this path in practice.
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def _is_zero_sha(sha: str) -> bool:
+    return bool(sha) and all(c == "0" for c in sha)
+
+
+def _git_out(repo: Path, argv: list[str]) -> str:
+    """Run a git command, returning stdout ('' on any failure)."""
+    try:
+        out = subprocess.run(
+            ["git", *argv], cwd=repo, capture_output=True, text=True, check=True,
+        )
+        return out.stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def read_push_refs() -> list[tuple[str, str]]:
+    """Parse git pre-push hook stdin: lines of
+    '<local-ref> <local-sha> <remote-ref> <remote-sha>'.
+    Returns [(local_sha, remote_sha), ...]. Empty when there is no stdin to read
+    (manual run from a TTY, or the ZCode gate which already consumed stdin)."""
+    if sys.stdin is None:
+        return []
+    try:
+        if sys.stdin.isatty():
+            return []
+        data = sys.stdin.read()
+    except Exception:
+        return []
+    refs: list[tuple[str, str]] = []
+    for line in data.splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        _local_ref, local_sha, _remote_ref, remote_sha = parts
+        refs.append((local_sha, remote_sha))
+    return refs
+
+
+def _first_push_base(repo: Path, local_sha: str) -> str | None:
+    """Base commit for a brand-new branch (remote SHA all zeros): the parent of
+    the oldest commit reachable from local_sha but on no remote. Returns None
+    when there is nothing new to diff."""
+    commits = _git_out(repo, ["rev-list", local_sha, "--not", "--remotes"]).split()
+    if not commits:
+        return None
+    oldest = commits[-1]
+    parent = _git_out(repo, ["rev-parse", "--verify", f"{oldest}^"]).strip()
+    return parent or EMPTY_TREE
+
+
+def push_range_diff(repo: Path, refs: list[tuple[str, str]],
+                    max_chars: int = DEFAULT_MAX_DIFF_CHARS) -> str:
+    """Diff the exact commits being pushed (remote..local per ref), rather than
+    just the tip. Returns '' when no usable range is found so the caller can
+    fall back to effective_diff()."""
+    chunks: list[str] = []
+    for local_sha, remote_sha in refs:
+        if _is_zero_sha(local_sha):
+            continue  # branch/tag deletion — nothing to classify
+        if _is_zero_sha(remote_sha):
+            base = _first_push_base(repo, local_sha)
+            if base is None:
+                continue
+        else:
+            base = remote_sha
+        d = _git_out(repo, ["diff", "--no-color", f"{base}..{local_sha}"])
+        if d.strip():
+            chunks.append(d)
+    if not chunks:
+        return ""
+    text = "\n".join(chunks)
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n\n... [truncated {len(text) - max_chars:,} chars]"
+    return text
+
+
+def hook_exit(code: int, args: "argparse.Namespace") -> int:
+    """Git hooks have no advisory tier: any non-zero pre-commit/pre-push exit
+    aborts the operation. Under a git-hook trigger, downgrade an advisory WARN
+    to OK so the human's commit/push proceeds (the warning is still printed).
+    The ZCode agent gate and manual runs keep EXIT_WARN so their callers can
+    still see the advisory signal. Hard blocks (EXIT_BLOCK) are never softened."""
+    trigger = getattr(args, "trigger", "") or ""
+    if code == EXIT_WARN and trigger.startswith("git-"):
+        return EXIT_OK
+    return code
+
+
 def diff_content_text(diff: str) -> str:
     """Extract content lines from a git diff, stripping git metadata."""
     lines = []
@@ -1481,7 +1575,7 @@ def cmd_scan_staged(args: argparse.Namespace) -> int:
         print("✓ No secrets or PII detected in staged changes.")
         return EXIT_OK
 
-    return EXIT_WARN if (secrets and not block) else EXIT_OK
+    return hook_exit(EXIT_WARN if (secrets and not block) else EXIT_OK, args)
 
 
 def cmd_classify_diff(args: argparse.Namespace) -> int:
@@ -1492,16 +1586,33 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
 
     cfg = load_config(repo)
 
-    # vendor guard: run local scan first
-    diff = effective_diff(repo, cfg["scan"]["max_diff_chars"])
+    # A pre-push hook hands us the exact commits being pushed on stdin
+    # (ref-lines). Manual and agent-gate runs have no stdin, so fall back to
+    # the staged-or-tip diff. Diff the pushed range, not just the tip commit.
+    trigger = getattr(args, "trigger", "") or ""
+    refs = read_push_refs() if trigger.startswith("git-") else []
+    diff = push_range_diff(repo, refs, cfg["scan"]["max_diff_chars"]) if refs else ""
     if not diff:
-        print("No staged changes to classify.")
+        diff = effective_diff(repo, cfg["scan"]["max_diff_chars"])
+    if not diff:
+        print("Nothing to classify.")
         return EXIT_OK
 
+    # vendor guard: run local scan first
     secrets, pii = scan_text(diff, cfg)
     if secrets:
-        print("⚠ Secrets detected — skipping vendor classification (policy).")
-        return EXIT_WARN
+        blocking = [s for s in secrets if s["severity"] == "block"]
+        hard_block = bool(blocking) and cfg["scan"]["block_on_secret"]
+        print("⚠ Secret-shaped content detected — skipping vendor classification (policy).")
+        for s in secrets[:8]:
+            tag = "BLOCK" if s["severity"] == "block" else "advisory"
+            print(f"    [{tag}] {s['pattern']}: {s['match']}  (line {s['line']})")
+        # A real secret must never reach a hosted provider, and it aborts.
+        # Identifier-shape matches (e.g. `password: z.string()` in a schema,
+        # placeholder env values) are advisory only — under a git hook they must
+        # not block the human's push, since git treats ANY non-zero pre-push
+        # exit as a failed push.
+        return hook_exit(EXIT_BLOCK if hard_block else EXIT_WARN, args)
 
     # repo-level sensitive flag
     local_cfg_path = repo / ".dev-decisions.toml"
@@ -1540,7 +1651,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
 
     if not results:
         print("No provider succeeded — diff unclassified.")
-        return EXIT_WARN if cfg["classify"]["block_on_classification"] else EXIT_OK
+        return EXIT_BLOCK if cfg["classify"]["block_on_classification"] else EXIT_OK
 
     print("\n".join(gate_summary))
     if escalated:
@@ -1565,7 +1676,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
 
     if escalated and cfg["classify"]["block_on_classification"]:
         return EXIT_BLOCK
-    return EXIT_OK if not escalated else EXIT_WARN
+    return hook_exit(EXIT_OK if not escalated else EXIT_WARN, args)
 
 
 def _sanitize_for_log(results: dict) -> dict:
