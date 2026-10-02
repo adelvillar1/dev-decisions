@@ -86,7 +86,7 @@ sys1 = _bootstrap_sys1()
 # plus the fan-out aliases. Falls back to the four core ids when sys1 isn't
 # installed (self-contained mode).
 _FALLBACK_PROVIDER_IDS = ["decide", "jev", "local", "modernbert"]
-_PROVIDER_ALIASES = ["both", "all", "core", "optin", "candidates"]
+_PROVIDER_ALIASES = ["both", "all", "core", "optin", "candidates", "auto"]
 
 
 def _provider_choices() -> list[str]:
@@ -180,7 +180,13 @@ def _sys1_classify_single(provider: str, task: str, text: str, cfg: dict) -> dic
     # "decide" or "jev") and used that one — but `both` used decide+jev+local.
     # We preserve the original semantics by running the same chain and using
     # the first provider whose answers are non-empty.
-    chain = _sys1_chain(provider)
+    if provider == "auto":
+        resolved_task = sys1.get_task(task) if isinstance(task, str) else task
+        chain, _route_reason = sys1.routing.route_decision(resolved_task, text, cfg)
+        if not chain:
+            chain = _sys1_chain("decide")
+    else:
+        chain = _sys1_chain(provider)
     result = sys1.classify(chain, task, text, cfg=cfg, log=False)
     for pid in chain:
         mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
@@ -188,6 +194,104 @@ def _sys1_classify_single(provider: str, task: str, text: str, cfg: dict) -> dic
         if answers:
             return {"provider": mapped, "answers": answers, "telemetry": result.telemetry.get(mapped, {})}
     return {"provider": chain[0] if chain else "", "answers": {}, "telemetry": {}}
+
+
+_FANOUT_MAX_FILES = 12
+
+
+def _split_diff_files(diff: str, max_files: int = _FANOUT_MAX_FILES) -> tuple[list[tuple[str, str]], list[str]]:
+    """
+    Split a unified diff into (path, chunk) pairs, largest chunks first, capped
+    at max_files. Chunks keep their 'diff --git' header so each section is a
+    well-formed per-file diff. Returns (included, omitted_paths).
+    """
+    chunks: list[tuple[str, str]] = []
+    cur_path: str | None = None
+    cur: list[str] = []
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if cur_path is not None:
+                chunks.append((cur_path, "".join(cur)))
+            m = re.search(r" b/(.+)$", line.rstrip("\n"))
+            cur_path = m.group(1) if m else line[len("diff --git "):].strip()
+            cur = [line]
+        elif cur_path is not None:
+            cur.append(line)
+    if cur_path is not None:
+        chunks.append((cur_path, "".join(cur)))
+    chunks.sort(key=lambda pc: len(pc[1]), reverse=True)
+    return chunks[:max_files], [p for p, _ in chunks[max_files:]]
+
+
+def _sys1_classify_fanout(provider: str, diff: str, cfg: dict) -> dict:
+    """
+    Speculative fan-out port (pattern from browser-use/jev-ultrafast): per-file
+    heads (risky noul + action choice per file) AND the standard pr_gate heads
+    all ride in ONE /v1/systemone request. Questions run in parallel, so
+    per-file coverage costs ~nothing in latency over the 3-head call; the app
+    uses the heads it needs and discards the rest. Built as a dynamic Task so
+    the built-in registry and per-provider head builders are untouched.
+    """
+    if sys1 is None:
+        raise RuntimeError("sys1 not available")
+    included, omitted = _split_diff_files(diff)
+    heads: list = []
+    for h in _build_pr_gate_heads()["jev"]:
+        heads.append(sys1.make_choice(h["instructions"], list(h["criteria"].keys()), id=h["id"], descriptions=dict(h["criteria"])))
+    file_meta: list[dict] = []
+    for i, (path, chunk) in enumerate(included):
+        heads.append(sys1.make_noul(
+            f"Does the change to {path} touch risky paths (auth, authz, payments, data deletion, secrets, migrations, concurrency)?",
+            id=f"f{i}_risky",
+        ))
+        heads.append(sys1.make_choice(
+            f"What should happen for {path} based on its diff?",
+            ["approve", "comment", "block"],
+            id=f"f{i}_action",
+            descriptions={
+                "approve": "No action needed for this file.",
+                "comment": "Worth a review comment.",
+                "block": "Should block the PR until fixed.",
+            },
+        ))
+        file_meta.append({"index": i, "path": path, "chunk": chunk})
+    parts = [
+        f"PR diff with {len(file_meta) + len(omitted)} changed files. "
+        f"Heads f0_risky/f0_action .. f{len(file_meta) - 1}_risky/f{len(file_meta) - 1}_action "
+        "map to the numbered file sections below, in order."
+    ]
+    if omitted:
+        parts.append("Files beyond the per-file limit have no heads; they are listed here for context only: " + ", ".join(omitted))
+    for m in file_meta:
+        parts.append(f"=== FILE f{m['index']}: {m['path']} ===\n{m['chunk']}")
+    state = "\n\n".join(parts)[: cfg["scan"]["max_diff_chars"]]
+    task = sys1.types.Task(
+        id="pr_gate_fanout",
+        heads=heads,
+        description="PR gate with speculative per-file fan-out heads",
+    )
+    chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("decide")
+    result = sys1.classify(chain, task, state, cfg=cfg, log=False)
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        answers = result.answers.get(mapped)
+        if answers:
+            return {
+                "provider": mapped,
+                "answers": answers,
+                "telemetry": result.telemetry.get(mapped, {}),
+                "files": [m["path"] for m in file_meta],
+                "omitted": omitted,
+                "latency_ms": result.latency_ms,
+            }
+    return {
+        "provider": chain[0] if chain else "",
+        "answers": {},
+        "telemetry": {},
+        "files": [m["path"] for m in file_meta],
+        "omitted": omitted,
+        "latency_ms": result.latency_ms,
+    }
 
 
 def _extract_labels(answers: dict[str, dict], *, prefer_key_substrings: tuple[str, ...] | None = None) -> list[str]:
@@ -367,10 +471,12 @@ DEFAULTS: dict = {
         "max_diff_chars": DEFAULT_MAX_DIFF_CHARS,
     },
     "classify": {
-        # Active providers: hosted Fastino (`decide`) and TypeSafe (`jev`).
-        # Local GLiNER is supported by design but not encouraged — offline /
-        # private-repo use only. See the sys1 provider policy (2026-09-28).
-        "provider": "decide",        # decide | jev | local | both
+        # "auto" (default) routes through sys1's router: capacity-gated chain,
+        # per-task overrides, and the roster default chain (glide,drex,jev)
+        # all live in sys1's config, so dev-decisions tracks the roster
+        # without code changes here. Explicit ids still pin a provider;
+        # without sys1 installed, auto falls back to decide.
+        "provider": "auto",          # auto | decide | jev | glide | drex | local | both
         "block_on_classification": False,
         "confidence_floor": 0.7,
         "escalate_on_null": True,
@@ -433,6 +539,19 @@ def load_config(repo_root: Path | None = None) -> dict:
             continue
         path = key[len("DEV_DECISIONS_"):].lower().split("__")
         _set_nested(cfg, path, _coerce(val))
+
+    # Inherit sys1's provider defaults for keys this config doesn't define.
+    # glide/drex and future roster providers live in sys1's DEFAULTS; without
+    # this their api_url keys are missing here, so sys1 availability checks
+    # mark them unavailable and they can never be routed to.
+    if sys1 is not None:
+        try:
+            for key, val in sys1.load_config().get("providers", {}).items():
+                cfg["providers"].setdefault(key, val)
+        except Exception:
+            pass  # sys1 config unavailable — keep our own defaults
+    if cfg["classify"].get("provider") == "auto" and sys1 is None:
+        cfg["classify"]["provider"] = "decide"  # no sys1: inline fallback path
 
     return cfg
 
@@ -2203,39 +2322,52 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
     """Classify PR diff and apply labels via gh."""
     branch = getattr(args, "branch", None)
     dry_run = getattr(args, "dry_run", False)
+    fanout = getattr(args, "fanout", False)
+    diff_file = getattr(args, "diff_file", None)
 
-    if not shutil.which("gh"):
-        print("error: gh CLI required (https://cli.github.com/)", file=sys.stderr)
-        return EXIT_ERROR
+    if diff_file:
+        pr_num = None
+        cfg = load_config(None)
+        diff = Path(diff_file).read_text()
+    else:
+        if not shutil.which("gh"):
+            print("error: gh CLI required (https://cli.github.com/)", file=sys.stderr)
+            return EXIT_ERROR
 
-    try:
-        pr_num = _gh_pr_number_for_branch(branch)
-    except RuntimeError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return EXIT_ERROR
+        try:
+            pr_num = _gh_pr_number_for_branch(branch)
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return EXIT_ERROR
 
-    cfg = load_config(None)
+        cfg = load_config(None)
 
-    # Fetch PR diff
-    try:
-        diff = _call_gh(["pr", "diff", pr_num])
-    except RuntimeError as e:
-        print(f"error: failed to fetch PR #{pr_num} diff: {e}", file=sys.stderr)
-        return EXIT_ERROR
+        # Fetch PR diff
+        try:
+            diff = _call_gh(["pr", "diff", pr_num])
+        except RuntimeError as e:
+            print(f"error: failed to fetch PR #{pr_num} diff: {e}", file=sys.stderr)
+            return EXIT_ERROR
 
     if not diff:
-        print(f"PR #{pr_num} has no diff.")
+        print("Diff is empty." if diff_file else f"PR #{pr_num} has no diff.")
         return EXIT_OK
 
     # Classify with pr_gate task
     provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
     task = "pr_gate"
 
+    fanout_meta: dict = {}
     try:
-        if sys1 is not None:
-            single = _sys1_classify_single(provider, task, diff, cfg)
+        if fanout and sys1 is not None:
+            single = _sys1_classify_fanout(provider, diff, cfg)
             parsed: dict = single.get("answers", {})
             item_telemetry: dict = single.get("telemetry", {})
+            fanout_meta = single
+        elif sys1 is not None:
+            single = _sys1_classify_single(provider, task, diff, cfg)
+            parsed = single.get("answers", {})
+            item_telemetry = single.get("telemetry", {})
         else:
             item_telemetry = {}
             heads = get_task_heads(task, provider.split("+")[0])
@@ -2269,8 +2401,12 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
         print(f"error: classification failed: {e}", file=sys.stderr)
         return EXIT_ERROR
 
-    # Extract labels (multi-label support)
-    labels_to_apply = _extract_labels(parsed) if sys1 is not None else None
+    # Extract labels (multi-label support). With --fanout, restrict to the
+    # three standard heads so per-file action choices never become PR labels.
+    if fanout:
+        labels_to_apply = _extract_labels(parsed, prefer_key_substrings=("diff_type", "risk_tier", "suggested_labels"))
+    else:
+        labels_to_apply = _extract_labels(parsed) if sys1 is not None else None
     if labels_to_apply is None:
         labels_to_apply = []
         for key, val in parsed.items():
@@ -2283,11 +2419,29 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
                         labels_to_apply.append(label)
         labels_to_apply = sorted(set(labels_to_apply))
 
-    print(f"PR #{pr_num} classification:")
+    subject = f"PR #{pr_num}" if pr_num is not None else "Diff"
+    print(f"{subject} classification:")
     print(f"  labels: {', '.join(labels_to_apply) or 'none'}")
 
-    if dry_run:
-        print("  (dry-run — labels not applied)")
+    if fanout_meta:
+        print(f"  per-file fan-out ({fanout_meta.get('provider')}, {fanout_meta.get('latency_ms')} ms, {len(fanout_meta.get('files', []))} file heads):")
+        for i, path in enumerate(fanout_meta.get("files", [])):
+            risky = parsed.get(f"f{i}_risky", {}) or {}
+            action = parsed.get(f"f{i}_action", {}) or {}
+            risk = risky.get("noul")
+            act = action.get("label") or "----"
+            risk_s = f"{risk:.2f}" if isinstance(risk, (int, float)) else "----"
+            print(f"    {act:>7}  risk={risk_s}  {path}")
+        omitted = fanout_meta.get("omitted") or []
+        if omitted:
+            shown = ", ".join(omitted[:5]) + ("..." if len(omitted) > 5 else "")
+            print(f"    (no heads for {len(omitted)} more files: {shown})")
+
+    if dry_run or pr_num is None:
+        if dry_run:
+            print("  (dry-run — labels not applied)")
+        else:
+            print("  (diff-file mode — labels not applied)")
         return EXIT_OK
 
     # Apply labels
@@ -2302,6 +2456,7 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
     log_record({
         "op": "pr-gate",
         "pr": pr_num,
+        "fanout": bool(fanout_meta),
         "repo": repo_name(get_repo_root() or Path(".")),
         "task": task,
         "provider": provider,
@@ -3410,6 +3565,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider (local recommended)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them")
+    sp.add_argument("--fanout", action="store_true",
+                    help="Speculative fan-out: per-file risky/action heads packed into ONE request alongside the standard heads")
+    sp.add_argument("--diff-file", default=None,
+                    help="Read the diff from a file instead of gh (offline; never applies labels)")
     sp.set_defaults(func=cmd_pr_gate)
 
     # triage-issues

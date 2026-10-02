@@ -7,9 +7,9 @@ warn_on_pii = true
 max_diff_chars = 12000
 
 [classify]
-# Active providers: hosted Fastino (`decide`) and TypeSafe (`jev`).
-# `local` is supported by design but not encouraged — offline/private repos.
-provider = "decide"          # decide | jev | local | both
+# Provider "auto" routes through sys1: capacity-gated chain, roster default
+# (glide,drex,jev). Explicit ids (decide/jev/glide/drex/local) pin a provider.
+provider = "auto"            # auto (sys1 router: glide,drex,jev) | decide | jev | local | both
 block_on_classification = false
 confidence_floor = 0.7
 escalate_on_null = true
