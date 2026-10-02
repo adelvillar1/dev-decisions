@@ -2473,7 +2473,10 @@ _PLAN_GATE_MAX_SECTIONS = 14
 _PLAN_GATE_MAX_TEST_FILES = 20
 _PLAN_GATE_TESTS_PER_FILE = 12
 _EVIDENCE_GATE_MAX_CRITERIA = 12
-_EVIDENCE_BLOCK_CHARS = 1500
+# Evidence bundles are the long-input case: full logs, not tails. Drex capacity
+# governs the state bound; smaller-window wires (jev fallback) truncate to
+# their own bounds internally.
+_EVIDENCE_BLOCK_CHARS = 20_000
 _EVIDENCE_VERDICTS = ("supported", "insufficient", "contradicted")
 _PLAN_GATE_SECTION_CHARS = 2000
 # Meta sections carry no proposed work; scope-creep heads would false-flag them.
@@ -2775,7 +2778,9 @@ def cmd_evidence_gate(args: argparse.Namespace) -> int:
         parts.append(f"C{i}: {c}")
     for i in judged:
         parts.append(f"=== EVIDENCE C{i} ===\n{blocks[f'C{i}']}")
-    state = "\n\n".join(parts)[: cfg["scan"]["max_diff_chars"]]
+    # Evidence bundles are the long-input case; Drex capacity governs, and
+    # smaller-window wires (jev fallback) truncate to their own bounds.
+    state = "\n\n".join(parts)[: cfg["providers"].get("drex_max_chars", 400_000)]
 
     task = sys1.types.Task(id="evidence_gate", heads=heads, description="QA evidence sufficiency/consistency gate (fail-closed)")
     chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("jev")
@@ -2807,6 +2812,14 @@ def cmd_evidence_gate(args: argparse.Namespace) -> int:
         s = _noul_p(f"c{i}_sufficient")
         con = _noul_p(f"c{i}_consistent")
         v = (answers.get(f"c{i}_verdict") or {}).get("label") or "insufficient"
+        # Fail-closed override: the verdict Choice and the nouls can disagree
+        # (no structural invariants — jev-1.13 jaggedness). A strong
+        # inconsistency or insufficiency signal downgrades the verdict in code,
+        # never the reverse. Thresholds are illustrative; fit from JSONL.
+        if isinstance(con, (int, float)) and con < 0.4 and v == "supported":
+            v = "contradicted"
+        if isinstance(s, (int, float)) and s < 0.4 and v == "supported":
+            v = "insufficient"
         s_s = f"{s:.2f}" if isinstance(s, (int, float)) else "----"
         c_s = f"{con:.2f}" if isinstance(con, (int, float)) else "----"
         print(f"    C{i}: {v.upper():<12} (sufficiency={s_s}, consistency={c_s})  {criteria[i][:90]}")

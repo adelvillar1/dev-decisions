@@ -152,15 +152,15 @@ dev-decisions plan-gate plan.md --tests tests/    # + criteria-vs-test-suite cov
 
 ## Evidence gating
 
-`evidence-gate` is the QA close-out check: does the collected evidence support a pass per acceptance criterion? A green exit code is weak evidence; this gate grades the bundle. Criteria come from the plan's checkboxes (order defines C<i>); evidence is a plain file with blocks tagged `== C0 ==`, `== C1 ==`, … containing commands, log tails, and outputs (bounded ~1500 chars/block).
+`evidence-gate` is the QA close-out check: does the collected evidence support a pass per acceptance criterion? A green exit code is weak evidence; this gate grades the bundle. Criteria come from the plan's checkboxes (order defines C<i>); evidence is a plain file with blocks tagged `== C0 ==`, `== C1 ==`, … containing commands, log tails, and full logs welcome — blocks bound at ~20k chars, total state bound at Drex capacity (~400k chars), so no tail-pasting.
 
 ```bash
 dev-decisions evidence-gate docs/plans/2026-10-02-feature.md closeout-evidence.md
 ```
 
-Per criterion with evidence: **sufficiency** noul (does it demonstrate the observable outcome), **consistency** noul (free of contradictions — skips, wrong build, errors the summary ignored, retried-until-pass), and a verdict choice (supported / insufficient / contradicted). Criteria without an evidence block come back NO EVIDENCE.
+Per criterion with evidence: **sufficiency** noul (does it demonstrate the observable outcome), **consistency** noul (free of contradictions — skips, wrong build, errors the summary ignored, retried-until-pass), and a verdict choice (supported / insufficient / contradicted). Criteria without an evidence block come back NO EVIDENCE. Routes `drex,jev` via by_task override (long-input corpus); `DREX_API_KEY`'s canonical home is the sys1 repo `.env`, with a consumer copy in `~/.config/dev-decisions/env`.
 
-**Fail-closed rules:** missing evidence is never a pass; the gate downgrades passes but never overturns a deterministic failure (a red test stays red — this judges evidence, not the test). Advisorial until calibrated; JSONL rows (`op: "evidence-gate"`) are hand-graded when later evidence contradicts a SUPPORTED verdict.
+**Fail-closed rules:** missing evidence is never a pass; the gate downgrades passes but never overturns a deterministic failure (a red test stays red — this judges evidence, not the test). A strong inconsistency or insufficiency signal downgrades the verdict choice in code, never the reverse (choice and nouls can disagree — no structural invariants). Advisorial until calibrated; JSONL rows (`op: "evidence-gate"`) are hand-graded when later evidence contradicts a SUPPORTED verdict.
 
 ## Issue triage
 
