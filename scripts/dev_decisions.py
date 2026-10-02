@@ -298,6 +298,95 @@ def _sys1_classify_fanout(provider: str, diff: str, cfg: dict) -> dict:
     }
 
 
+def _merge_draws(draws: list) -> dict:
+    """
+    Majority-vote merge of n per-provider answer dicts (dynamic tasks,
+    plan-gate self-consistency). Noul heads: mean p across draws, stdev, and
+    an unstable flag when draws straddle the 0.5 cut. Choice/score heads:
+    majority label, mean confidence, unstable when labels disagree.
+    """
+    valid = [d for d in draws if isinstance(d, dict) and d]
+    merged: dict = {}
+    head_ids: list = []
+    for d in valid:
+        for hid in d:
+            if hid not in head_ids:
+                head_ids.append(hid)
+    for hid in head_ids:
+        vals = [d[hid] for d in valid if isinstance(d.get(hid), dict) and not d[hid].get("_declined")]
+        if not vals:
+            merged[hid] = {"_declined": "no-answer", "confidence": 0.0}
+            continue
+        sample = dict(vals[0])
+        nouls = [float(v["noul"]) for v in vals if isinstance(v.get("noul"), (int, float))]
+        if nouls:
+            mean = sum(nouls) / len(nouls)
+            stdev = (sum((x - mean) ** 2 for x in nouls) / len(nouls)) ** 0.5 if len(nouls) > 1 else 0.0
+            sample["noul"] = round(mean, 4)
+            sample["mean"] = round(mean, 4)
+            sample["stdev"] = round(stdev, 4)
+            sample["unstable"] = len({x >= 0.5 for x in nouls}) > 1
+            sample["draws"] = len(nouls)
+        else:
+            labels = [v.get("label") for v in vals if v.get("label") is not None]
+            if labels:
+                counts: dict = {}
+                for lab in labels:
+                    counts[lab] = counts.get(lab, 0) + 1
+                sample["label"] = max(counts, key=lambda k: counts[k])
+                confs = [float(v["confidence"]) for v in vals if isinstance(v.get("confidence"), (int, float))]
+                if confs:
+                    sample["confidence"] = round(sum(confs) / len(confs), 4)
+                sample["stdev"] = 0.0 if len(counts) == 1 else 1.0
+                sample["unstable"] = len(counts) > 1
+                sample["draws"] = len(labels)
+        merged[hid] = sample
+    return merged
+
+
+def _sys1_consistency(chain: list, task, state: str, cfg: dict, n: int = 3) -> tuple:
+    """
+    Plan-gate self-consistency: n draws per provider down the chain, first
+    provider with any answers wins (same semantics as _sys1_classify_single).
+    Returns (merged_answers, provider_used, total_latency_ms, draws_used,
+    telemetry) — merged answers carry mean/stdev/unstable per head so the
+    2026-10-02 jaggedness finding (3 runs, 3 different flag sets on identical
+    input) becomes measurable per run instead of requiring three manual runs.
+    """
+    used_provider, total_ms, used_draws, used_telemetry = "", 0, 0, {}
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        draws: list = []
+        ok = False
+        for _ in range(max(1, n)):
+            try:
+                result = sys1.classify(pid, task, state, cfg=cfg, log=False)
+            except Exception:
+                break
+            total_ms += result.latency_ms
+            got = (result.answers or {}).get(mapped) or {}
+            if got:
+                ok = True
+                used_telemetry = result.telemetry.get(mapped, {})
+            draws.append(got)
+        if ok:
+            return _merge_draws(draws), mapped, float(total_ms), sum(1 for d in draws if d), used_telemetry
+    return {}, chain[0] if chain else "", float(total_ms), 0, {}
+
+
+def _diff_paths(diff: str) -> list:
+    """Changed paths from diff --git headers (the b/ side)."""
+    return [m.group(1) for m in re.finditer(r"^diff --git \S+ b/(.+)$", diff, re.M)]
+
+
+_DOC_EXTS = (".md", ".rst", ".txt", ".adoc")
+
+
+def _is_doc_path(path: str) -> bool:
+    low = path.lower()
+    return low.endswith(_DOC_EXTS) or low.startswith(("docs/", "documentation/"))
+
+
 def _extract_labels(answers: dict[str, dict], *, prefer_key_substrings: tuple[str, ...] | None = None) -> list[str]:
     """
     Take sys1/dev-decisions answers {head_id: {label/score/noul}} and flatten
@@ -1189,20 +1278,21 @@ def get_task_heads(task: str, provider: str) -> list[dict]:
     return task_def.get(provider, task_def.get("decide", []))
 
 
-def detect_task_from_diff(diff: str) -> str:
-    """Heuristic task detection from diff content."""
+def detect_task_from_diff(diff: str, paths: list | None = None) -> str:
+    paths = paths if paths is not None else _diff_paths(diff)
     diff_lower = diff.lower()
-    # dependency files
-    dep_patterns = ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-                    "requirements.txt", "pyproject.toml", "cargo.toml", "go.mod", "gemfile", "pom.xml"]
-    if any(p in diff_lower for p in dep_patterns):
+    dep_patterns = ["package.json", "package-lock.json", "yarn.lock", "requirements.txt",
+                    "pyproject.toml", "Pipfile", "poetry.lock", "pom.xml", "build.gradle",
+                    "Cargo.toml", "go.mod", "composer.json", "Gemfile"]
+    # dep manifests are matched on CHANGED PATHS (a README mentioning
+    # package.json used to route here via body text)
+    if any(any(d in pp.lower() for d in dep_patterns) for pp in paths):
         return "deps_risk"
-    # docs-only diff
-    doc_patterns = [".md", ".rst", ".txt", "docs/", "documentation/"]
-    if all(p in diff_lower for p in [".md"]) or "docs/" in diff_lower:
+    # docs-only = every changed path is a doc file (was: any ".md" anywhere in
+    # the diff body, which code diffs mentioning a markdown path also hit)
+    if paths and all(_is_doc_path(pp) for pp in paths):
         return "docs_drift"
     return "change"
-
 
 def _call_jev_raw(body: str, api_key: str | None, cfg: dict, telemetry: dict | None = None) -> dict:
     """
@@ -1758,7 +1848,8 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
             return EXIT_WARN
 
     provider = args.provider or cfg["classify"]["provider"]
-    task = args.task or detect_task_from_diff(diff)
+    changed_paths = _diff_paths(diff)
+    task = args.task or detect_task_from_diff(diff, changed_paths)
 
     # ── classify: sys1 library if importable, inline providers otherwise ──
     if sys1 is not None:
@@ -1777,6 +1868,29 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         print("No provider succeeded — diff unclassified.")
         return EXIT_BLOCK if cfg["classify"]["block_on_classification"] else EXIT_OK
 
+    # Mechanical pushdown (2026-10-02 graded evidence): a diff whose changed
+    # paths are all doc files cannot introduce code drift. Force the drift
+    # noul to no and change_mix to docs-only in code — the model is not asked
+    # what code already decides. Same fail-closed-override precedent as
+    # evidence-gate's verdict downgrade.
+    overridden: list = []
+    if task == "docs_drift" and changed_paths and all(_is_doc_path(pp) for pp in changed_paths):
+        for prov, heads in results.items():
+            if not isinstance(heads, dict):
+                continue
+            for hid, a in list(heads.items()):
+                if not isinstance(a, dict):
+                    continue
+                if "drift" in hid.lower() and isinstance(a.get("noul"), (int, float)):
+                    if a["noul"] >= 0.5:
+                        a["noul"] = 0.0
+                        overridden.append(f"{prov}:{hid}")
+                if "change_mix" in hid.lower() and a.get("label") not in (None, "docs-only"):
+                    a["label"] = "docs-only"
+                    overridden.append(f"{prov}:{hid}")
+        if overridden:
+            print("  [pushdown] all-docs diff: drift forced to no (code rule, not model).")
+
     print("\n".join(gate_summary))
     if escalated:
         print(f"\n⚠ Low confidence or null verdict — human review recommended (floor {cfg['classify']['confidence_floor']}).")
@@ -1792,6 +1906,7 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         "input_chars": len(diff),
         "input_sha256": hashlib.sha256(diff.encode()).hexdigest()[:16],
         "heads": _sanitize_for_log(results),
+        "overridden": overridden,
         "verdict": "escalated" if escalated else "pass",
         "escalated": escalated,
         "latency_ms": elapsed_ms,
@@ -1816,6 +1931,83 @@ def _sanitize_for_log(results: dict) -> dict:
                     if field in v and isinstance(v[field], str):
                         v[field] = "[redacted]"
     return safe
+
+
+_DESTRUCTIVE_PATTERNS = [
+    r"git\s+push\s+.*--force",
+    r"rm\s+-rf\s+",
+    r"DROP\s+TABLE",
+    r"TRUNCATE\s+TABLE",
+    r"alembic\s+.*(?:upgrade|downgrade).*head",
+    r"migrate\s+.*(?:up|down).*production",
+    r"rails\s+db:migrate",
+    r"kubectl\s+delete",
+]
+
+
+def _strip_inert_spans(cmd: str) -> str:
+    """
+    Remove text that cannot execute: single/double-quoted spans and heredoc
+    bodies. Command substitutions ($( ... ), `...`) deliberately STAY in the
+    skeleton because they run. The destructive-pattern gate matches against
+    this skeleton, so a grep ARGUMENT or a commit MESSAGE quoting dangerous
+    words stops tripping the gate (8 graded false positives 2026-10-02, two
+    at block severity).
+    """
+    out = []
+    i, n = 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch in ("'", '"'):
+            # Exception: a quoted span is NOT inert when it is the argument of
+            # an interpreter flag — `psql -c 'DROP TABLE users'` executes the
+            # SQL. Keep such spans in the skeleton.
+            prev_token = re.search(r"(\S+)\s*$", "".join(out))
+            prev = prev_token.group(1) if prev_token else ""
+            if prev == "eval" or prev == "exec" or prev.endswith("-c"):
+                end = cmd.find(ch, i + 1)
+                span_end = (end + 1) if end != -1 else n
+                out.append(cmd[i:span_end])
+                i = span_end
+                continue
+            quote = ch
+            i += 1
+            while i < n:
+                if quote == '"' and cmd[i] == chr(92):
+                    i += 2
+                    continue
+                if cmd[i] == quote:
+                    if i + 1 < n and cmd[i + 1] == quote:
+                        i += 2
+                        continue
+                    break
+                i += 1
+            i += 1
+            out.append(" ")
+        elif cmd.startswith("<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)(\w+)\1", cmd[i:])
+            if m:
+                tag = m.group(2)
+                line_end = cmd.find("\n", i)
+                if line_end == -1:
+                    i = n
+                    out.append(" ")
+                    continue
+                body_start = line_end + 1
+                m_end = re.search(rf"^{re.escape(tag)}\s*$", cmd[body_start:], re.M)
+                i = body_start + m_end.end() if m_end else n
+                out.append(" ")
+            else:
+                out.append(ch)
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _sha16(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def cmd_zcode_gate(args: argparse.Namespace) -> int:
@@ -1847,18 +2039,13 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
     advisory_only = gate_cfg.get("advisory_only", True)
 
     # ── destructive-pattern detection ─────────────────────────────────────
-    destructive_patterns = [
-        r"git\s+push\s+.*--force",
-        r"rm\s+-rf\s+",
-        r"DROP\s+TABLE",
-        r"TRUNCATE\s+TABLE",
-        r"--no-verify",
-        r"alembic\s+.*(?:upgrade|downgrade).*head",
-        r"migrate\s+.*(?:up|down).*production",
-        r"rails\s+db:migrate",
-        r"kubectl\s+delete",
-    ]
-    destructive_hits = [p for p in destructive_patterns if re.search(p, git_cmd, re.IGNORECASE)]
+    # Patterns match the INERT-STRIPPED skeleton: quoted spans and heredoc
+    # bodies are text, not commands. --no-verify is a hook bypass, not a
+    # destructive op (graded false positive 2026-10-02), so it surfaces as a
+    # separate advisory flag instead of feeding the block path.
+    skeleton = _strip_inert_spans(git_cmd)
+    hook_bypass = bool(re.search(r"--no-verify", skeleton, re.IGNORECASE))
+    destructive_hits = [p for p in _DESTRUCTIVE_PATTERNS if re.search(p, skeleton, re.IGNORECASE)]
 
     if destructive_hits:
         print(f"[gate] destructive pattern detected in: {git_cmd}", file=sys.stderr)
@@ -1902,7 +2089,8 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
         # refine reversibility, the high-stakes patterns still hard-block
         # (presumed irreversible); lower-stakes destructive hits stay advisory.
         _high_stakes = any(p in destructive_hits for p in (
-            r"git\s+push\s+.*--force", r"DROP\s+TABLE", r"TRUNCATE\s+TABLE", r"kubectl\s+delete"))
+            _DESTRUCTIVE_PATTERNS[0], _DESTRUCTIVE_PATTERNS[2], _DESTRUCTIVE_PATTERNS[3],
+            _DESTRUCTIVE_PATTERNS[7]))
         irreversible = (reversible_p is not None and reversible_p < 0.5) or (
             reversible_p is None and str(reversible).lower() in ("no", "false"))
         if irreversible or (_high_stakes and reversible_p is None and reversible == "unknown"):
@@ -1911,8 +2099,13 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
             log_record({
                 "op": "zcode-gate",
                 "tool": tool,
-                "command": git_cmd[:200],
-                "verdict": "block",
+                                "command": git_cmd[:200],
+                "input_sha256": _sha16(git_cmd),
+                "task": "safety",
+                "patterns_hit": destructive_hits,
+                "hook_bypass": hook_bypass,
+                "heads": safety_result,
+"verdict": "block",
                 "policy": "hitl-irreversible",
                 "destructive": True,
                 "reversible": reversible,
@@ -1926,8 +2119,13 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
             log_record({
                 "op": "zcode-gate",
                 "tool": tool,
-                "command": git_cmd[:200],
-                "verdict": "advisory_warn",
+                                "command": git_cmd[:200],
+                "input_sha256": _sha16(git_cmd),
+                "task": "safety",
+                "patterns_hit": destructive_hits,
+                "hook_bypass": hook_bypass,
+                "heads": safety_result,
+"verdict": "advisory_warn",
                 "destructive": True,
                 "reversible": reversible,
                 "reversible_confidence": reversible_conf,
@@ -1939,8 +2137,13 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
             log_record({
                 "op": "zcode-gate",
                 "tool": tool,
-                "command": git_cmd[:200],
-                "verdict": "block",
+                                "command": git_cmd[:200],
+                "input_sha256": _sha16(git_cmd),
+                "task": "safety",
+                "patterns_hit": destructive_hits,
+                "hook_bypass": hook_bypass,
+                "heads": safety_result,
+"verdict": "block",
                 "destructive": True,
                 "reversible": reversible,
                 "reversible_confidence": reversible_conf,
@@ -1949,7 +2152,24 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
             return EXIT_BLOCK
 
     # ── git commit / push gating ──────────────────────────────────────────
-    if not re.match(r"git\s+(commit|push)\b", git_cmd):
+    if not re.match(r"git\s+(commit|push)\b", skeleton):
+        # true-negative row: scanned, nothing destructive in the skeleton —
+        # the calibration counterweight to the pattern hits.
+        if hook_bypass:
+            print("[gate] note: --no-verify bypasses hooks (advisory, non-blocking)", file=sys.stderr)
+        log_record({
+            "op": "zcode-gate",
+            "tool": tool,
+            "command": git_cmd[:200],
+            "input_sha256": _sha16(git_cmd),
+            "task": "safety",
+            "patterns_hit": [],
+            "hook_bypass": hook_bypass,
+            "verdict": "clean",
+            "destructive": False,
+            "reversible": "unknown",
+            "advisory_only": advisory_only,
+        })
         return EXIT_OK
 
     # Determine trigger
@@ -2661,16 +2881,9 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
 
     task = sys1.types.Task(id="plan_gate", heads=heads, description="Plan vs acceptance-criteria coverage gate (speculative fan-out)")
     chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("jev")
-    result = sys1.classify(chain, task, state, cfg=cfg, log=False)
-    answers: dict = {}
-    used_provider = chain[0] if chain else ""
-    used_latency = result.latency_ms
-    for pid in chain:
-        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
-        if result.answers.get(mapped):
-            answers = result.answers[mapped]
-            used_provider = mapped
-            break
+    n_draws = max(1, int(getattr(args, "draws", 3) or 3))
+    answers, used_provider, used_latency, draws_used, used_telemetry = _sys1_consistency(
+        chain, task, state, cfg, n=n_draws)
     if not answers:
         print(f"error: no provider answered (chain: {', '.join(chain)})", file=sys.stderr)
         return EXIT_ERROR
@@ -2684,7 +2897,8 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     for i, c in enumerate(criteria):
         p = _noul_p(f"c{i}_covered")
         if p is None or p < 0.5:
-            missing.append(f"    [MISSING]     C{i} (p={p if p is not None else '----'}) {c[:110]}")
+            unstable = " /UNSTABLE" if (answers.get(f"c{i}_covered") or {}).get("unstable") else ""
+            missing.append(f"    [MISSING{unstable}]     C{i} (p={p if p is not None else '----'}) {c[:110]}")
         v = (answers.get(f"c{i}_verifiable") or {}).get("label")
         if v == "unverifiable":
             unverifiable.append(f"    [UNVERIFIABLE] C{i}: {c[:110]}")
@@ -2728,15 +2942,21 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
         "plan": str(plan_path),
         "provider": used_provider,
         "task": "plan_gate",
+        "input_sha256": _sha16(state),
+        "draws": draws_used,
         "criteria": len(criteria),
         "sections": len(sections),
         "uncovered": [i for i in range(len(criteria)) if (_noul_p(f"c{i}_covered") or 0) < 0.5],
         "creep_sections": [j for j in range(len(sections)) if (_noul_p(f"s{j}_in_scope") or 0) < 0.5],
+        "unstable": [i for i in range(len(criteria))
+                     if (answers.get(f"c{i}_covered") or {}).get("unstable")],
+        "heads": {hid: {k: a[k] for k in ("noul", "label", "confidence", "mean", "stdev", "unstable", "draws") if k in a}
+                  for hid, a in answers.items() if isinstance(a, dict) and not a.get("_declined")},
         "untested_criteria": untested,
         "test_files": len(test_files),
         "verdict": "gaps" if gaps else "pass",
         "latency_ms": used_latency,
-        "telemetry": result.telemetry.get(used_provider, {}),
+        "telemetry": used_telemetry,
     })
     print(f"  verdict: {'GAPS' if gaps else 'PASS'}")
     return EXIT_WARN if gaps else EXIT_OK
@@ -2986,6 +3206,8 @@ def cmd_evidence_gate(args: argparse.Namespace) -> int:
         "evidence": str(evidence_path),
         "provider": used_provider,
         "task": "evidence_gate",
+        "input_sha256": _sha16(state),
+        "heads": answers,
         "judged": len(judged),
         "no_evidence": no_evidence,
         "not_supported": not_supported,
@@ -3197,6 +3419,8 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
         "plan": str(plan_path),
         "provider": providers_used,
         "task": "docs_gate",
+        "input_sha256": _sha16(cov_state),
+        "heads": answers,
         "artifacts": len(artifacts),
         "uncovered": uncovered,
         "stale_claims": stale_hits,
@@ -3342,7 +3566,10 @@ def cmd_arch_gate(args: argparse.Namespace) -> int:
         "tech_doc": doc_rel,
         "provider": used_provider,
         "task": "arch_gate",
+        "input_sha256": _sha16(state),
+        "heads": answers,
         "claims": len(claims),
+        "claim_texts": [str(c.get("text") if isinstance(c, dict) else c)[:140] for c in claims],
         "drifts": drifts,
         "undocumented": gaps,
         "verdict": "drift" if drifts else ("conventions-gaps" if gaps else "pass"),
@@ -3384,6 +3611,223 @@ def cmd_disposition(args: argparse.Namespace) -> int:
         "decided_by": getattr(args, "by", None) or os.environ.get("USER", "user"),
     })
     print(f"disposition recorded: {args.gate} {args.target} -> {args.status}")
+
+    # Close the calibration loop: pair this human verdict with the original
+    # prediction so the JSONL gains graded rows without a separate grading
+    # session (2026-10-02: production had ZERO feedback rows before manual
+    # grading because this step never existed).
+    try:
+        event = _find_gate_event(args.gate, args.target)
+        if event is None:
+            print("  (no matching gate event found — no feedback rows written)")
+        else:
+            rows = _disposition_feedback_rows(args.status, event, args.reason)
+            written = 0
+            for r in rows:
+                if not r["actual"]:
+                    continue
+                _write_feedback(r["input_sha256"], r["task"], r["provider"],
+                                r["actual"], r["note"], r["head_id"])
+                written += 1
+            print(f"  calibration: {written} feedback row(s) written from the matched event"
+                  + ("" if event.get("input_sha256") else " (event lacks input_sha256 — pre-enrichment row)"))
+    except Exception as e:
+        print(f"  (feedback pairing skipped: {e})")
+    return EXIT_OK
+
+
+def cmd_plan_reconcile(args: argparse.Namespace) -> int:
+    """
+    Grade a plan's surface artifact against the actual commit sequence (the
+    forward-validation half of plan-surface): reconstruct the per-head
+    predictions, run the attribution layer over the commits, reconcile
+    predicted order/edges vs reality, and write plan_surface_map/plan_deps
+    feedback rows. Run after a plan completes; re-runnable.
+    """
+    if _plansurface is None:
+        print("error: plan-reconcile requires sys1 with the plansurface module", file=sys.stderr)
+        return EXIT_ERROR
+    plan_path = Path(args.plan).expanduser()
+    if not plan_path.exists():
+        print(f"error: plan not found: {plan_path}", file=sys.stderr)
+        return EXIT_ERROR
+    artifact_path = (Path(args.artifact).expanduser() if getattr(args, "artifact", None)
+                     else SURFACES_DIR / f"{plan_path.stem}.surface.json")
+    if not artifact_path.exists():
+        print(f"error: no surface artifact at {artifact_path} — run `dev-decisions plan-surface` first", file=sys.stderr)
+        return EXIT_ERROR
+    artifact = json.loads(artifact_path.read_text())
+    meta = artifact.get("meta", {})
+    repo_root = Path(args.repo_root).expanduser() if args.repo_root else Path(meta.get("repo_root") or Path.cwd())
+    criteria = meta.get("criteria_texts") or _parse_plan_criteria(plan_path.read_text())
+    if not criteria:
+        print("error: no criteria found (artifact meta or plan checkboxes)", file=sys.stderr)
+        return EXIT_ERROR
+    cfg = load_config(None)
+
+    # per-head predictions: persisted answers on new artifacts, argmax
+    # summaries on pre-2026-10-02 artifacts
+    answers = meta.get("answers") or {}
+    map_answers = dict(answers.get("map") or {})
+    dep_answers = dict(answers.get("deps") or {})
+    if not map_answers:
+        for node in artifact.get("criteria", []):
+            try:
+                i = int(node["id"][1:])
+            except (ValueError, KeyError, TypeError):
+                continue
+            mods = node.get("modules") or []
+            if mods:
+                map_answers[f"c{i}_modules"] = {
+                    "label": mods[0]["id"], "confidence": mods[0]["p"],
+                    "probabilities": {m["id"]: m["p"] for m in mods}}
+            anyp = node.get("touches_any")
+            if isinstance(anyp, (int, float)):
+                map_answers[f"c{i}_any"] = {"noul": anyp}
+    if not dep_answers:
+        for key, probs in (meta.get("dep_probs") or {}).items():
+            if not isinstance(probs, dict) or not probs:
+                continue
+            i, j = key.split(",")
+            label = max(probs, key=lambda k: probs[k])
+            dep_answers[f"p_{i}_{j}"] = {"label": label, "confidence": probs[label],
+                                         "probabilities": probs}
+    map_res = {"provider": meta.get("provider_map", ""), "answers": map_answers,
+               "sha256": meta.get("sha_map") or _sha16(json.dumps(artifact, sort_keys=True))}
+    dep_res = {"provider": meta.get("provider_deps", ""), "answers": dep_answers,
+               "sha256": meta.get("sha_deps") or "", "sha_by_head": {}}
+
+    # commit window: frontmatter created minus one day (same default as the probe)
+    created = None
+    m = re.search(r"^created:\s*(\S+)", plan_path.read_text(), re.M)
+    if m:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            created = _dt.fromisoformat(m.group(1))
+        except ValueError:
+            created = None
+    default_since = ((created - _td(days=1)).date().isoformat()
+                     if created else "1970-01-01")
+    since = args.since or default_since
+
+    commits = _plansurface.load_commits(repo_root, since=since, max_commits=args.max_commits)
+    print(f"Plan reconcile: {plan_path.name}  ({len(criteria)} criteria, {len(commits)} commits since {since})")
+    attributed: dict = {}
+    if args.attribute_provider and commits:
+        print(f"  attribution layer ({args.attribute_provider}) ...")
+        attr = _plansurface.run_attribution(commits, criteria, provider=args.attribute_provider, cfg=cfg)
+        for k, c in enumerate(commits):
+            lab = (attr["answers"].get(f"a{k}_crit") or {}).get("label")
+            if lab and lab != "none":
+                attributed[c["sha"]] = lab
+
+    graded = _plansurface.grade_and_record(artifact, commits, map_res, dep_res,
+                                           attributed=attributed or None, cfg=cfg)
+    rec = graded["reconcile"]
+    at = rec["at_threshold"]
+    print(f"  predicted order: {' -> '.join(rec['predicted_order']) or '(none)'}")
+    print(f"  actual order:    {' -> '.join(rec['actual_order']) or '(none)'}")
+    print(f"  tau={rec['tau']}  direction_precision={at['direction_precision']}  "
+          f"adjacent_coverage={at['adjacent_coverage']}  "
+          f"unimplemented={', '.join(rec['criteria_unimplemented']) or '(none)'}")
+    print(f"  feedback rows: {graded['feedback_rows']}")
+
+    log_record({
+        "op": "plan-reconcile",
+        "plan": str(plan_path),
+        "repo": str(repo_root),
+        "provider": f"map={meta.get('provider_map')},deps={meta.get('provider_deps')}",
+        "task": "plan_surface_map+plan_deps",
+        "criteria": len(criteria),
+        "commits": len(commits),
+        "tau": rec["tau"],
+        "direction_precision": at["direction_precision"],
+        "adjacent_coverage": at["adjacent_coverage"],
+        "unimplemented": rec["criteria_unimplemented"],
+        "feedback_rows": graded["feedback_rows"],
+        "verdict": "ok",
+    })
+    return EXIT_OK
+
+
+def cmd_calibration(args: argparse.Namespace) -> int:
+    """
+    Which heads have enough graded rows to fit confidence floors? Reads the
+    dev-decisions feedback store AND the sys1 store (graded rows from manual
+    grading sessions land there), joins per (task, head, provider), and
+    reports count, confidence span, binned accuracy, and a qualifies verdict
+    (>= --min-rows spanning >= --min-span). The 'when to fit' answer as a
+    command, not a judgment call.
+    """
+    feedback_rows: list = []
+
+    def _absorb(path):
+        if not path.exists():
+            return 0
+        n = 0
+        for line in path.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if r.get("op") == "feedback" or ("actual" in r and "predicted" in r) or                     ("label" in r and "input_sha256" in r):
+                predicted = r.get("predicted")
+                if predicted is None:
+                    predicted = r.get("label")
+                feedback_rows.append({
+                    "task": r.get("task"), "provider": r.get("provider"),
+                    "head_id": r.get("head_id"),
+                    "predicted": predicted,
+                    "confidence": r.get("predicted_confidence"),
+                    "actual": r.get("actual"),
+                })
+                n += 1
+        return n
+
+    n_dd = _absorb(LOG_DIR / "feedback" / "feedback.jsonl")
+    n_sys1 = 0
+    try:
+        if _plansurface is not None:
+            sys1_cfg = sys1.load_config()
+            sys1_log = Path(sys1_cfg["classify"].get("log_dir")
+                            or Path.home() / ".local/share/sys1/logs")
+            n_sys1 = sum(_absorb(f) for f in sorted(sys1_log.glob("20*/*/*/events.jsonl")))
+    except Exception as e:
+        print(f"(sys1 store unreadable: {e})", file=sys.stderr)
+
+    groups: dict = {}
+    for r in feedback_rows:
+        key = (str(r["task"]), str(r.get("head_id") or "-"), str(r.get("provider") or "-"))
+        groups.setdefault(key, []).append(r)
+
+    report = []
+    for (task, head_id, provider), rows in sorted(groups.items()):
+        graded = [r for r in rows if r["predicted"] is not None and r["actual"] is not None]
+        n = len(graded)
+        correct = sum(1 for r in graded if str(r["predicted"]) == str(r["actual"]))
+        confs = [float(r["confidence"]) for r in rows if isinstance(r.get("confidence"), (int, float))]
+        span = round(max(confs) - min(confs), 3) if confs else 0.0
+        bins = [0, 0] * 2  # [count, correct] per quartile
+        curve = []
+        for lo in (0.0, 0.25, 0.5, 0.75):
+            inbin = [r for r in graded if isinstance(r.get("confidence"), (int, float))
+                     and lo <= r["confidence"] < lo + 0.25]
+            ok = sum(1 for r in inbin if str(r["predicted"]) == str(r["actual"]))
+            curve.append({"bin": [lo, lo + 0.25], "n": len(inbin), "accuracy": round(ok / len(inbin), 3) if inbin else None})
+        qualifies = n >= args.min_rows and span >= args.min_span
+        report.append({"task": task, "head": head_id, "provider": provider,
+                       "n": n, "accuracy": round(correct / n, 3) if n else None,
+                       "span": span, "curve": curve, "qualifies_for_fit": qualifies})
+
+    if args.format == "json":
+        print(json.dumps({"sources": {"dev-decisions": n_dd, "sys1": n_sys1}, "groups": report}, indent=2))
+        return EXIT_OK
+
+    print(f"Calibration: {n_dd} rows from dev-decisions, {n_sys1} from the sys1 store")
+    print(f"{'task':<22} {'head':<24} {'provider':<12} {'n':>4} {'acc':>6} {'span':>5}  fit?")
+    for g in report:
+        print(f"{g['task']:<22} {g['head']:<24} {g['provider']:<12} {g['n']:>4} "
+              f"{str(g['accuracy']):>6} {g['span']:>5}  {'YES' if g['qualifies_for_fit'] else ''}")
     return EXIT_OK
 
 
@@ -3803,7 +4247,21 @@ def cmd_feedback(args: argparse.Namespace) -> int:
 
     provider = getattr(args, "provider", None)
     note = getattr(args, "note", None)
+    head_id = getattr(args, "head_id", None)
 
+    try:
+        _write_feedback(input_sha256, task, provider, label, note, head_id)
+        print(f"Logged feedback for {input_sha256} (task={task}, label={label})")
+        return EXIT_OK
+    except Exception as e:
+        print(f"error: failed to write feedback: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+def _write_feedback(input_sha256: str, task: str, provider: str | None, label: str,
+                    note: str | None = None, head_id: str | None = None) -> None:
+    """One graded-outcome row in feedback.jsonl (head_id additive; the
+    dashboard join reads only known keys, so extra keys are safe)."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "input_sha256": input_sha256,
@@ -3812,18 +4270,101 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         "label": label,
         "note": note,
     }
+    if head_id:
+        record["head_id"] = head_id
+    feedback_dir = LOG_DIR / "feedback"
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+    feedback_path = feedback_dir / "feedback.jsonl"
+    with open(feedback_path, "a") as f:
+        f.write(json.dumps(record, default=str) + "\n")
 
-    try:
-        feedback_dir = LOG_DIR / "feedback"
-        feedback_dir.mkdir(parents=True, exist_ok=True)
-        feedback_path = feedback_dir / "feedback.jsonl"
-        with open(feedback_path, "a") as f:
-            f.write(json.dumps(record, default=str) + "\n")
-        print(f"Logged feedback for {input_sha256} (task={task}, label={label})")
-        return EXIT_OK
-    except Exception as e:
-        print(f"error: failed to write feedback: {e}", file=sys.stderr)
-        return EXIT_ERROR
+
+_GATE_OP_TARGET_FIELD = {
+    "plan-gate": ("plan-gate", "plan"),
+    "arch-gate": ("arch-gate", "plan"),
+    "docs-gate": ("docs-gate", "plan"),
+    "evidence-gate": ("evidence-gate", "plan"),
+    "pr-gate": ("pr-gate", "repo"),
+    "zcode-gate": ("zcode-gate", "command"),
+}
+
+
+def _find_gate_event(gate: str, target: str, days: int = 30) -> dict | None:
+    """Most recent event row for this gate whose target field matches the
+    disposition target (substring either way). Newest file first, bounded
+    window — dispositions are written close to the verdict they close."""
+    spec = _GATE_OP_TARGET_FIELD.get(gate)
+    if not spec:
+        return None
+    op, field = spec
+    cutoff = time.time() - days * 86400
+    for f in sorted(LOG_DIR.glob("20*/*/*/events.jsonl"), reverse=True):
+        try:
+            if f.stat().st_mtime < cutoff:
+                continue
+            for line in reversed(f.read_text().splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("op") != op:
+                    continue
+                val = str(row.get(field) or "")
+                tgt = str(target)
+                if val and (val in tgt or tgt in val):
+                    return row
+        except Exception:
+            continue
+    return None
+
+
+def _disposition_feedback_rows(status: str, row: dict, reason: str | None) -> list:
+    """
+    Map a disposition onto per-head feedback rows (the HITL calibration loop,
+    2026-10-02 grading session): fixed/waived mean the gate judged right
+    (actual = predicted); overridden means the model was wrong (actual =
+    inverse for yes/no heads, None for choice heads where inversion is
+    undefined). Requires the event row to carry input_sha256 + heads — the
+    enriched rows written since 2026-10-02 do; older rows are skipped.
+    """
+    out: list = []
+    sha = row.get("input_sha256")
+    if not sha:
+        return out
+    heads = row.get("heads") if isinstance(row.get("heads"), dict) else {}
+    provider = row.get("provider")
+    flat = heads.get(provider) if isinstance(heads.get(provider), dict) else heads
+    if not isinstance(flat, dict):
+        # multi-provider chains log "glide+drex" style — split and take the
+        # first resolvable
+        for part in str(provider or "").split("+"):
+            if isinstance(heads.get(part), dict):
+                flat = heads[part]
+                break
+    if not isinstance(flat, dict):
+        return out
+    task = row.get("task") or row.get("op")
+    note = f"disposition {status}: {(reason or '').strip()[:140]}"
+    for head_id, a in flat.items():
+        if not isinstance(a, dict) or str(head_id).startswith("_"):
+            continue
+        predicted = a.get("label")
+        conf = a.get("confidence")
+        if predicted is None and isinstance(a.get("noul"), (int, float)):
+            predicted = "yes" if a["noul"] >= 0.5 else "no"
+            conf = round(float(a["noul"]), 4)
+        if predicted is None:
+            continue
+        if status == "overridden":
+            actual = ("no" if predicted == "yes" else "yes") if predicted in ("yes", "no") else None
+        else:
+            actual = predicted
+        out.append({"input_sha256": sha, "task": task, "provider": provider,
+                    "head_id": head_id, "predicted": predicted,
+                    "predicted_confidence": conf, "actual": actual, "note": note})
+    return out
 
 
 # ── dashboard ─────────────────────────────────────────────────────────────────
@@ -4492,6 +5033,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # plan-gate
     sp = sub.add_parser("plan-gate", help="Gate a plan against its acceptance criteria (coverage + scope matrix)")
+    sp.add_argument("--draws", type=int, default=3,
+                    help="Self-consistency draws per head (2026-10-02: single-draw flags proved jagged; default 3, majority/mean merged)")
     sp.add_argument("plan", help="Path to the plan markdown file")
     sp.add_argument("--criteria-file", default=None,
                     help="External requirements file (default: checkbox lines in the plan itself)")
@@ -4546,6 +5089,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_evidence_gate)
+
+    # plan-reconcile
+    sp = sub.add_parser("plan-reconcile",
+                        help="Grade a plan's surface artifact against the actual commit sequence (forward validation)")
+    sp.add_argument("plan", help="Plan markdown file (must have a plan-surface artifact)")
+    sp.add_argument("--repo-root", default=None, help="Repository the plan targets (default: artifact meta)")
+    sp.add_argument("--artifact", default=None, help="Surface artifact path (default: surfaces dir by plan stem)")
+    sp.add_argument("--since", default=None, help="Commit window start (default: plan created - 1 day)")
+    sp.add_argument("--max-commits", type=int, default=400)
+    sp.add_argument("--attribute-provider", default="jev",
+                    help="Commit-to-criterion attribution layer ('' disables)")
+    sp.set_defaults(func=cmd_plan_reconcile)
+
+    # calibration
+    sp = sub.add_parser("calibration",
+                        help="Per-head graded-row counts, curves, and floor-fit readiness from both feedback stores")
+    sp.add_argument("--min-rows", type=int, default=20, help="Graded rows required to fit (default 20)")
+    sp.add_argument("--min-span", type=float, default=0.4, help="Confidence span required to fit (default 0.4)")
+    sp.add_argument("--format", choices=["text", "json"], default="text")
+    sp.set_defaults(func=cmd_calibration)
 
     # disposition
     sp = sub.add_parser("disposition", help="Record the human decision on a negative gate verdict (fixed / waived / overridden)")
@@ -4615,6 +5178,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label", required=True, help="Correct label (ground truth)")
     sp.add_argument("--provider", default=None, help="Provider tag (e.g. decide, local, modernbert_raw)")
     sp.add_argument("--note", default=None, help="Optional free-text note")
+    sp.add_argument("--head-id", default=None, help="Head the feedback grades (additive; per-head calibration)")
     sp.set_defaults(func=cmd_feedback)
 
     # dashboard — live local monitoring

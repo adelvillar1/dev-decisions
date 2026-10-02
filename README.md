@@ -122,6 +122,10 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 
 ![v0.2.0 workflows](docs/workflows.svg)
 
+## Plan reconcile + calibration
+
+`plan-reconcile <plan.md>` grades a plan's surface artifact against its actual commits (tau, edge precision, feedback rows). `calibration` reports per-head graded-row counts, accuracy curves, and floor-fit readiness across both feedback stores. See SKILL.md for detail.
+
 ## Plan surface
 
 `plan-surface` is the feed-forward counterpart of `plan-gate`: it precomputes the judgment graph a plan decomposer should assemble against — criterion-to-module mapping, pairwise criterion dependencies with confidences, thresholded DAG with topological order, uncertain band, risk flags — and writes the artifact to `~/.local/share/dev-decisions/surfaces/`. See SKILL.md ("Plan surface") for the layer detail and calibration notes.
