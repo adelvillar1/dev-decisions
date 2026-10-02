@@ -2468,6 +2468,171 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+_PLAN_GATE_MAX_CRITERIA = 12
+_PLAN_GATE_MAX_SECTIONS = 14
+_PLAN_GATE_SECTION_CHARS = 2000
+# Meta sections carry no proposed work; scope-creep heads would false-flag them.
+_PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes")
+
+
+def _parse_plan_sections(text: str) -> list[tuple[str, str]]:
+    """Split plan markdown into (heading, body) pairs at '## ' and '### ' headings.
+
+    Splitting at ### too keeps phases/subsections in their own sections, so the
+    per-section character bound never silently truncates the evidence for a
+    later criterion (the context-rot edge).
+    """
+    sections: list[tuple[str, str]] = []
+    heading: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        if (line.startswith("## ") or line.startswith("### ")) and not line.startswith("####"):
+            if heading is not None:
+                sections.append((heading, "\n".join(body).strip()))
+            heading = line.lstrip("#").strip()
+            body = []
+        elif heading is not None:
+            body.append(line)
+    if heading is not None:
+        sections.append((heading, "\n".join(body).strip()))
+    return sections
+
+
+def _parse_plan_criteria(text: str) -> list[str]:
+    """Checkbox lines ('- [ ]' / '- [x]') are the acceptance criteria."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*-\s+\[[ xX]\]\s+(.+)$", line)
+        if m:
+            out.append(m.group(1).strip())
+    return out
+
+
+def cmd_plan_gate(args: argparse.Namespace) -> int:
+    """
+    Gate a plan against its acceptance criteria (the plan-as-contract check):
+      - coverage: per-criterion noul — does the plan body satisfy it?
+      - verifiability: per-criterion choice — observable / partial / unverifiable
+      - scope creep: per-work-section noul — does any criterion require it?
+    Counting happens in code (never the model); exit 1 when gaps exist.
+    """
+    plan_path = Path(args.plan)
+    if not plan_path.exists():
+        print(f"error: plan not found: {plan_path}", file=sys.stderr)
+        return EXIT_ERROR
+    if sys1 is None:
+        print("error: plan-gate requires sys1", file=sys.stderr)
+        return EXIT_ERROR
+
+    text = plan_path.read_text()
+    if args.criteria_file:
+        criteria = [ln.strip().lstrip("-").strip() for ln in Path(args.criteria_file).read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    else:
+        criteria = _parse_plan_criteria(text)
+    if not criteria:
+        print("error: no acceptance criteria found (checkbox lines) and no --criteria-file given.", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+
+    overflow = criteria[_PLAN_GATE_MAX_CRITERIA:]
+    criteria = criteria[:_PLAN_GATE_MAX_CRITERIA]
+    all_sections = _parse_plan_sections(text)
+    sections = [(h, b) for h, b in all_sections if not any(k in h.lower() for k in _PLAN_GATE_SKIP_SECTIONS)][:_PLAN_GATE_MAX_SECTIONS]
+
+    heads: list = []
+    for i, c in enumerate(criteria):
+        heads.append(sys1.make_noul(
+            f"Does the plan body contain steps that satisfy acceptance criterion C{i}? Criterion: {c}",
+            id=f"c{i}_covered"))
+        heads.append(sys1.make_choice(
+            f"Does the plan state an observable outcome that would settle acceptance criterion C{i}?",
+            ["observable", "partial", "unverifiable"],
+            id=f"c{i}_verifiable",
+            descriptions={
+                "observable": "The plan names a concrete checkable result (file, behavior, or test) for this criterion.",
+                "partial": "The plan gestures at the criterion without a checkable result.",
+                "unverifiable": "The plan gives no way to tell the criterion was satisfied.",
+            }))
+    for j, (h, _b) in enumerate(sections):
+        heads.append(sys1.make_noul(
+            f"Does at least one acceptance criterion (C0..C{len(criteria) - 1} listed in the state) require the work described in section s{j} ({h})?",
+            id=f"s{j}_in_scope"))
+
+    parts = [f"A development plan with {len(criteria)} acceptance criteria (C0..C{len(criteria) - 1}) and {len(sections)} work sections (s0..s{len(sections) - 1})."]
+    for i, c in enumerate(criteria):
+        parts.append(f"C{i}: {c}")
+    for j, (h, b) in enumerate(sections):
+        parts.append(f"=== SECTION s{j}: {h} ===\n{b[:_PLAN_GATE_SECTION_CHARS]}")
+    if overflow:
+        parts.append("Criteria beyond the head limit have no heads; context only: " + " | ".join(overflow))
+    state = "\n\n".join(parts)[: cfg["scan"]["max_diff_chars"]]
+
+    task = sys1.types.Task(id="plan_gate", heads=heads, description="Plan vs acceptance-criteria coverage gate (speculative fan-out)")
+    chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("jev")
+    result = sys1.classify(chain, task, state, cfg=cfg, log=False)
+    answers: dict = {}
+    used_provider = chain[0] if chain else ""
+    used_latency = result.latency_ms
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        if result.answers.get(mapped):
+            answers = result.answers[mapped]
+            used_provider = mapped
+            break
+    if not answers:
+        print(f"error: no provider answered (chain: {', '.join(chain)})", file=sys.stderr)
+        return EXIT_ERROR
+
+    def _noul_p(head_id: str):
+        a = answers.get(head_id) or {}
+        p = a.get("noul")
+        return p if isinstance(p, (int, float)) else None
+
+    missing, creep, unverifiable = [], [], []
+    for i, c in enumerate(criteria):
+        p = _noul_p(f"c{i}_covered")
+        if p is None or p < 0.5:
+            missing.append(f"    [MISSING]     C{i} (p={p if p is not None else '----'}) {c[:110]}")
+        v = (answers.get(f"c{i}_verifiable") or {}).get("label")
+        if v == "unverifiable":
+            unverifiable.append(f"    [UNVERIFIABLE] C{i}: {c[:110]}")
+    for j, (h, _b) in enumerate(sections):
+        p = _noul_p(f"s{j}_in_scope")
+        if p is None or p < 0.5:
+            creep.append(f"    [SCOPE?]      s{j} (p={p if p is not None else '----'}) {h}")
+
+    print(f"Plan gate: {plan_path.name}  (provider={used_provider}, {used_latency} ms, {len(criteria)} criteria, {len(sections)} sections)")
+    print(f"  coverage: {len(criteria) - len(missing)}/{len(criteria)} covered")
+    for line in missing:
+        print(line)
+    for line in unverifiable:
+        print(line)
+    print(f"  scope: {len(sections) - len(creep)}/{len(sections)} in scope")
+    for line in creep:
+        print(line)
+    if overflow:
+        print(f"  (no heads for {len(overflow)} more criteria)")
+
+    gaps = bool(missing or unverifiable or creep)
+    log_record({
+        "op": "plan-gate",
+        "plan": str(plan_path),
+        "provider": used_provider,
+        "task": "plan_gate",
+        "criteria": len(criteria),
+        "sections": len(sections),
+        "uncovered": [i for i in range(len(criteria)) if (_noul_p(f"c{i}_covered") or 0) < 0.5],
+        "creep_sections": [j for j in range(len(sections)) if (_noul_p(f"s{j}_in_scope") or 0) < 0.5],
+        "verdict": "gaps" if gaps else "pass",
+        "latency_ms": used_latency,
+        "telemetry": result.telemetry.get(used_provider, {}),
+    })
+    print(f"  verdict: {'GAPS' if gaps else 'PASS'}")
+    return EXIT_WARN if gaps else EXIT_OK
+
+
 def cmd_triage_issues(args: argparse.Namespace) -> int:
     """Batch-classify issues and apply labels."""
     repo = getattr(args, "repo", None)
@@ -3570,6 +3735,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--diff-file", default=None,
                     help="Read the diff from a file instead of gh (offline; never applies labels)")
     sp.set_defaults(func=cmd_pr_gate)
+
+    # plan-gate
+    sp = sub.add_parser("plan-gate", help="Gate a plan against its acceptance criteria (coverage + scope matrix)")
+    sp.add_argument("plan", help="Path to the plan markdown file")
+    sp.add_argument("--criteria-file", default=None,
+                    help="External requirements file (default: checkbox lines in the plan itself)")
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
+                    help="Override config provider")
+    sp.set_defaults(func=cmd_plan_gate)
 
     # triage-issues
     sp = sub.add_parser("triage-issues", help="Batch-classify issues and apply labels")

@@ -22,6 +22,10 @@ dev-decisions pr-gate 123 --provider local
 dev-decisions pr-gate --fanout --dry-run     # per-file heads packed into ONE request
 dev-decisions pr-gate --diff-file patch.diff --fanout   # offline; never applies labels
 
+# Plan gating (plan-as-contract)
+dev-decisions plan-gate docs/plans/2026-10-02-feature.md
+dev-decisions plan-gate plan.md --criteria-file requirements.txt
+
 # Issue triage (dry-run by default)
 dev-decisions triage-issues [owner/repo] --limit 20
 dev-decisions triage-issues --state all --dry-run
@@ -128,6 +132,17 @@ dev-decisions pr-gate --diff-file patch.diff --fanout
 **`--fanout` (speculative fan-out):** packs a risky Noul + action Choice per changed file (cap 12, largest chunks first) into the SAME request as the standard diff_type/risk_tier/labels heads — 19 heads in one call, measured *faster* than the 3-head call, with per-file verdicts printed. Requires sys1; routes to `jev` via by_task override. `--diff-file` reads any unified diff offline and never applies labels. Overall labels always come only from the three standard heads — per-file action choices never become PR labels.
 
 Labels applied: `bug`, `feature`, `refactor`, `docs`, `chore`, `test`, `ci` (multi-label).
+
+## Plan gating
+
+`plan-gate` runs the plan-as-contract check on a plan markdown file: per acceptance criterion, is it **covered** (noul) and **verifiable** (observable/partial/unverifiable choice); per work section, is it **in scope** (scope-creep check). Criteria are the plan's checkbox lines (`- [ ]`/`- [x]`) or a `--criteria-file`; sections are `##`/`###` headings minus meta sections (outcome, verification, files-to-touch, etc.). One speculative fan-out request; routes to `jev` via by_task override. Exit 1 when gaps exist, 0 when clean.
+
+```bash
+dev-decisions plan-gate docs/plans/2026-10-02-feature.md
+dev-decisions plan-gate plan.md --criteria-file requirements.txt
+```
+
+**Coverage ≠ correctness:** a flag is a review trigger, not a veto — borderline probabilities (roughly 0.3–0.6) mean escalate to human, and the gate is advisorial by design until floors are fitted from JSONL outcomes (`op: "plan-gate"` rows, hand-graded; ~20 plans to calibration).
 
 ## Issue triage
 
