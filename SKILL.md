@@ -29,6 +29,9 @@ dev-decisions plan-gate plan.md --criteria-file requirements.txt
 # Evidence gating (QA close-out)
 dev-decisions evidence-gate plan.md closeout-evidence.md
 
+# Architecture gating (plan vs documented architecture)
+dev-decisions arch-gate docs/plans/2026-10-02-feature.md
+
 # Issue triage (dry-run by default)
 dev-decisions triage-issues [owner/repo] --limit 20
 dev-decisions triage-issues --state all --dry-run
@@ -161,6 +164,17 @@ dev-decisions evidence-gate docs/plans/2026-10-02-feature.md closeout-evidence.m
 Per criterion with evidence: **sufficiency** noul (does it demonstrate the observable outcome), **consistency** noul (free of contradictions — skips, wrong build, errors the summary ignored, retried-until-pass), and a verdict choice (supported / insufficient / contradicted). Criteria without an evidence block come back NO EVIDENCE. Routes `drex,jev` via by_task override (long-input corpus); `DREX_API_KEY`'s canonical home is the sys1 repo `.env`, with a consumer copy in `~/.config/dev-decisions/env`.
 
 **Fail-closed rules:** missing evidence is never a pass; the gate downgrades passes but never overturns a deterministic failure (a red test stays red — this judges evidence, not the test). A strong inconsistency or insufficiency signal downgrades the verdict choice in code, never the reverse (choice and nouls can disagree — no structural invariants). Advisorial until calibrated; JSONL rows (`op: "evidence-gate"`) are hand-graded when later evidence contradicts a SUPPORTED verdict.
+
+## Architecture gating
+
+`arch-gate` asks: is the plan introducing anything that goes against the architecture documented in the project's TECHNICAL-DOCUMENTATION.md? Claims come from the plan's approach/phases/files sections; the rubric is the tech doc's sections. Per claim: **documented** noul (does the doc address this area), **conflict** noul (does the documented architecture contradict the claim), and a verdict choice (conforms / drifts / undocumented).
+
+```bash
+dev-decisions arch-gate docs/plans/2026-10-02-feature.md
+dev-decisions arch-gate plan.md --tech-doc docs/TECH-DOC.md --repo-root ~/Projects/my-repo
+```
+
+Verdicts are derived in code, fail-closed: low documented → **UNDOCUMENTED** (a conventions gap in the tech doc — never a drift accusation without a written rubric); high conflict downgrades a conforms verdict to **DRIFTS** (exit 1, human review required). Undocumented claims are documentation findings, not plan defects. The judge reads the doc, never code — conformance is against the documented architecture, and where the doc is stale, that contradiction is itself the finding.
 
 ## Issue triage
 

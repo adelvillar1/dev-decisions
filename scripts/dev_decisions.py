@@ -2482,6 +2482,12 @@ _DOCS_GATE_MAX_ARTIFACTS = 8
 _DOCS_GATE_MAX_SECTIONS = 16
 _DOCS_GATE_SECTION_CHARS = 2000
 _DOCS_GATE_MAX_STALE = 8
+_ARCH_GATE_MAX_CLAIMS = 12
+_ARCH_GATE_DOC_SECTIONS = 20
+_ARCH_GATE_DOC_SECTION_CHARS = 2000
+_ARCH_GATE_CLAIM_CHARS = 300
+_ARCH_GATE_VERDICTS = ("conforms", "drifts", "undocumented")
+_ARCH_GATE_META_SKIP = ("acceptance criteria", "outcome", "verification", "linked artifacts", "out of scope", "status", "context")
 _PLAN_GATE_SECTION_CHARS = 2000
 # Meta sections carry no proposed work; scope-creep heads would false-flag them.
 _PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes")
@@ -3057,6 +3063,156 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
     })
     print(f"  verdict: {'GAPS' if gaps else 'PASS'}")
     return EXIT_WARN if gaps else EXIT_OK
+
+
+def _arch_gate_claims(text: str) -> list[str]:
+    """Architectural claims from a plan: non-meta section leads + file-touch lines."""
+    claims: list[str] = []
+    for h, b in _parse_plan_sections(text):
+        hl = h.lower()
+        if any(k in hl for k in _ARCH_GATE_META_SKIP):
+            continue
+        lead = re.sub(r"\s+", " ", b).strip()[:_ARCH_GATE_CLAIM_CHARS]
+        if len(lead) >= 30:
+            claims.append(f"[{h}] {lead}")
+        if "files" in hl:
+            for line in b.splitlines():
+                paths = re.findall(r"`([^`]+)`", line)
+                purpose = re.sub(r"`[^`]*`", "", line).strip().lstrip("-—– ").strip()
+                for tok in paths:
+                    if len(tok.strip()) > 3:
+                        claims.append(f"[files] {tok.strip()}: {purpose[:150]}")
+    out, seen = [], set()
+    for c in claims:
+        key = c.lower()[:80]
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out[:_ARCH_GATE_MAX_CLAIMS]
+
+
+def cmd_arch_gate(args: argparse.Namespace) -> int:
+    """
+    Architectural fit gate: does the plan introduce anything that goes against
+    the architecture documented in TECHNICAL-DOCUMENTATION.md? Per plan claim:
+    documented noul (does the doc address this area), conflict noul (does the
+    documented architecture contradict it), verdict choice (conforms / drifts /
+    undocumented). Fail-closed derivation: a high conflict signal downgrades a
+    conforms verdict; a low documented signal forces "undocumented" (a
+    conventions gap, not a drift accusation — no rubric, no verdict). Drifts
+    exit 1; undocumented claims are reported as documentation findings.
+    """
+    plan_path = Path(args.plan)
+    if not plan_path.exists():
+        print(f"error: plan not found: {plan_path}", file=sys.stderr)
+        return EXIT_ERROR
+    if sys1 is None:
+        print("error: arch-gate requires sys1", file=sys.stderr)
+        return EXIT_ERROR
+
+    repo_root = Path(getattr(args, "repo_root", None) or Path.cwd())
+    doc_rel = getattr(args, "tech_doc", None) or "TECHNICAL-DOCUMENTATION.md"
+    doc_path = repo_root / doc_rel
+    if not doc_path.exists():
+        print(f"error: technical documentation not found: {doc_path} (pass --tech-doc)", file=sys.stderr)
+        return EXIT_ERROR
+
+    claims = _arch_gate_claims(plan_path.read_text())
+    if not claims:
+        print("error: no architectural claims found in the plan (approach/phases/files sections).", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+
+    doc_sections = _parse_plan_sections(doc_path.read_text())[:_ARCH_GATE_DOC_SECTIONS]
+
+    heads: list = []
+    for k, claim in enumerate(claims):
+        heads.append(sys1.make_noul(
+            f"Does the technical documentation address the architectural area this plan claim touches? Claim: {claim}",
+            id=f"k{k}_documented"))
+        heads.append(sys1.make_noul(
+            f"Does the documented architecture contradict or advise against this plan claim? Claim: {claim}",
+            id=f"k{k}_conflict"))
+        heads.append(sys1.make_choice(
+            f"Architectural verdict for this plan claim against the documented architecture?",
+            list(_ARCH_GATE_VERDICTS),
+            id=f"k{k}_verdict",
+            descriptions={
+                "conforms": "The claim is consistent with the documented architecture and patterns.",
+                "drifts": "The documented architecture contradicts this claim or advises against it.",
+                "undocumented": "The documentation does not cover this area; no architectural verdict is possible.",
+            }))
+
+    parts = [f"Architecture fit check for a plan with {len(claims)} claims (K0..K{len(claims) - 1}) against the technical documentation sections (d<j>.<s>)."]
+    for k, c in enumerate(claims):
+        parts.append(f"K{k}: {c}")
+    for j, (h, b) in enumerate(doc_sections):
+        parts.append(f"=== d{j} [{h}] ===\n{b[:_ARCH_GATE_DOC_SECTION_CHARS]}")
+    state = "\n\n".join(parts)[: cfg["providers"].get("drex_max_chars", 400_000)]
+
+    task = sys1.types.Task(id="arch_gate", heads=heads, description="Plan vs documented-architecture conformance gate (speculative fan-out)")
+    chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("jev")
+    result = sys1.classify(chain, task, state, cfg=cfg, log=False)
+    answers: dict = {}
+    used_provider = chain[0] if chain else ""
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        if result.answers.get(mapped):
+            answers = result.answers[mapped]
+            used_provider = mapped
+            break
+    if not answers:
+        print(f"error: no provider answered (chain: {', '.join(chain)})", file=sys.stderr)
+        return EXIT_ERROR
+
+    def _noul_p(head_id: str):
+        a = answers.get(head_id) or {}
+        p = a.get("noul")
+        return p if isinstance(p, (int, float)) else None
+
+    print(f"Arch gate: {plan_path.name} vs {doc_rel}  (provider={used_provider}, {result.latency_ms} ms, {len(claims)} claims, {len(doc_sections)} doc sections)")
+    drifts, gaps = [], []
+    for k, claim in enumerate(claims):
+        documented = _noul_p(f"k{k}_documented")
+        conflict = _noul_p(f"k{k}_conflict")
+        v = (answers.get(f"k{k}_verdict") or {}).get("label") or "undocumented"
+        # Fail-closed derivation: no rubric -> undocumented (never accuse
+        # without documentation); a strong conflict signal downgrades a
+        # conforms verdict. Never upgrades drifts away.
+        if isinstance(documented, (int, float)) and documented < 0.4:
+            v = "undocumented"
+        if isinstance(conflict, (int, float)) and conflict >= 0.6 and v == "conforms":
+            v = "drifts"
+        d_s = f"{documented:.2f}" if isinstance(documented, (int, float)) else "----"
+        c_s = f"{conflict:.2f}" if isinstance(conflict, (int, float)) else "----"
+        print(f"    {v.upper():<13} (documented={d_s}, conflict={c_s})  {claim[:95]}")
+        if v == "drifts":
+            drifts.append(k)
+        if v == "undocumented":
+            gaps.append(k)
+
+    log_record({
+        "op": "arch-gate",
+        "plan": str(plan_path),
+        "tech_doc": doc_rel,
+        "provider": used_provider,
+        "task": "arch_gate",
+        "claims": len(claims),
+        "drifts": drifts,
+        "undocumented": gaps,
+        "verdict": "drift" if drifts else ("conventions-gaps" if gaps else "pass"),
+        "latency_ms": result.latency_ms,
+        "telemetry": result.telemetry.get(used_provider, {}),
+    })
+    if drifts:
+        print(f"  verdict: DRIFT ({len(drifts)} claim(s) conflict with the documented architecture) — human review required")
+    elif gaps:
+        print(f"  verdict: PASS with {len(gaps)} conventions gap(s) — document these areas to make future gates stricter")
+    else:
+        print("  verdict: PASS")
+    return EXIT_WARN if drifts else EXIT_OK
 
 
 def cmd_triage_issues(args: argparse.Namespace) -> int:
@@ -4182,6 +4338,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_docs_gate)
+
+    # arch-gate
+    sp = sub.add_parser("arch-gate", help="Gate a plan against the documented architecture (conformance / drift / conventions-gap)")
+    sp.add_argument("plan", help="Plan markdown file")
+    sp.add_argument("--tech-doc", default=None, help="Path to the technical documentation (default: TECHNICAL-DOCUMENTATION.md in --repo-root)")
+    sp.add_argument("--repo-root", default=None, help="Repo root (default: cwd)")
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
+                    help="Override config provider")
+    sp.set_defaults(func=cmd_arch_gate)
 
     # evidence-gate
     sp = sub.add_parser("evidence-gate", help="Gate QA evidence per acceptance criterion (fail-closed close-out check)")
