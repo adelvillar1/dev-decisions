@@ -3750,6 +3750,135 @@ def cmd_plan_reconcile(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _daily_series(graded_rows: list, days: int = 30) -> list:
+    """Graded rows bucketed by day: [{date, n, accuracy}] sorted by date,
+    capped to the last `days` buckets WITH data. Rows without a usable ts or
+    actual are excluded (they cannot sit on a time axis)."""
+    buckets: dict = {}
+    for r in graded_rows:
+        ts = str(r.get("ts") or "")
+        if len(ts) < 10 or r.get("actual") is None or r.get("predicted") is None:
+            continue
+        day = ts[:10]
+        b = buckets.setdefault(day, {"n": 0, "ok": 0})
+        b["n"] += 1
+        b["ok"] += 1 if str(r["predicted"]) == str(r["actual"]) else 0
+    out = [{"date": d, "n": b["n"], "accuracy": round(b["ok"] / b["n"], 3)}
+           for d, b in sorted(buckets.items())]
+    return out[-days:]
+
+
+def _trend(daily: list, *, min_side: int = 3, min_total: int = 6) -> dict:
+    """Early-vs-late accuracy halves (split by graded-row count). direction:
+    up/down at +/-0.05, flat between, None while gathering."""
+    total = sum(b["n"] for b in daily)
+    if len(daily) < 2 or total < min_total:
+        return {"direction": None, "reason": "gathering"}
+    half, acc = total / 2, 0
+    split = 1
+    for i, b in enumerate(daily):
+        acc += b["n"]
+        if acc >= half and i + 1 < len(daily):
+            split = i + 1
+            break
+    early, late = daily[:split], daily[split:]
+    en, ln = sum(b["n"] for b in early), sum(b["n"] for b in late)
+    if en < min_side or ln < min_side:
+        return {"direction": None, "reason": "gathering"}
+    em = sum(b["accuracy"] * b["n"] for b in early) / en
+    lm = sum(b["accuracy"] * b["n"] for b in late) / ln
+    delta = lm - em
+    direction = "up" if delta >= 0.05 else ("down" if delta <= -0.05 else "flat")
+    return {"direction": direction, "early_acc": round(em, 3), "late_acc": round(lm, 3),
+            "early_n": en, "late_n": ln, "delta": round(delta, 3)}
+
+
+def _daily_series(graded_rows: list, days: int = 30) -> list:
+    """Graded rows bucketed by day: [{date, n, accuracy}] sorted by date,
+    capped to the last `days` buckets WITH data. Rows without a usable ts or
+    actual are excluded (they cannot sit on a time axis)."""
+    buckets: dict = {}
+    for r in graded_rows:
+        ts = str(r.get("ts") or "")
+        if len(ts) < 10 or r.get("actual") is None or r.get("predicted") is None:
+            continue
+        day = ts[:10]
+        b = buckets.setdefault(day, {"n": 0, "ok": 0})
+        b["n"] += 1
+        b["ok"] += 1 if str(r["predicted"]) == str(r["actual"]) else 0
+    out = [{"date": d, "n": b["n"], "accuracy": round(b["ok"] / b["n"], 3)}
+           for d, b in sorted(buckets.items())]
+    return out[-days:]
+
+
+def _trend(daily: list, *, min_side: int = 3, min_total: int = 6) -> dict:
+    """Early-vs-late accuracy halves (split by graded-row count). direction:
+    up/down at +/-0.05, flat between, None while gathering."""
+    total = sum(b["n"] for b in daily)
+    if len(daily) < 2 or total < min_total:
+        return {"direction": None, "reason": "gathering"}
+    half, acc = total / 2, 0
+    split = 1
+    for i, b in enumerate(daily):
+        acc += b["n"]
+        if acc >= half and i + 1 < len(daily):
+            split = i + 1
+            break
+    early, late = daily[:split], daily[split:]
+    en, ln = sum(b["n"] for b in early), sum(b["n"] for b in late)
+    if en < min_side or ln < min_side:
+        return {"direction": None, "reason": "gathering"}
+    em = sum(b["accuracy"] * b["n"] for b in early) / en
+    lm = sum(b["accuracy"] * b["n"] for b in late) / ln
+    delta = lm - em
+    direction = "up" if delta >= 0.05 else ("down" if delta <= -0.05 else "flat")
+    return {"direction": direction, "early_acc": round(em, 3), "late_acc": round(lm, 3),
+            "early_n": en, "late_n": ln, "delta": round(delta, 3)}
+
+
+def _daily_series(graded_rows: list, days: int = 30) -> list:
+    """Graded rows bucketed by day: [{date, n, accuracy}] sorted by date,
+    capped to the last `days` buckets WITH data. Rows without a usable ts or
+    actual are excluded (they cannot sit on a time axis)."""
+    buckets: dict = {}
+    for r in graded_rows:
+        ts = str(r.get("ts") or "")
+        if len(ts) < 10 or r.get("actual") is None or r.get("predicted") is None:
+            continue
+        day = ts[:10]
+        b = buckets.setdefault(day, {"n": 0, "ok": 0})
+        b["n"] += 1
+        b["ok"] += 1 if str(r["predicted"]) == str(r["actual"]) else 0
+    out = [{"date": d, "n": b["n"], "accuracy": round(b["ok"] / b["n"], 3)}
+           for d, b in sorted(buckets.items())]
+    return out[-days:]
+
+
+def _trend(daily: list, *, min_side: int = 3, min_total: int = 6) -> dict:
+    """Early-vs-late accuracy halves (split by graded-row count). direction:
+    up/down at +/-0.05, flat between, None while gathering."""
+    total = sum(b["n"] for b in daily)
+    if len(daily) < 2 or total < min_total:
+        return {"direction": None, "reason": "gathering"}
+    half, acc = total / 2, 0
+    split = 1
+    for i, b in enumerate(daily):
+        acc += b["n"]
+        if acc >= half and i + 1 < len(daily):
+            split = i + 1
+            break
+    early, late = daily[:split], daily[split:]
+    en, ln = sum(b["n"] for b in early), sum(b["n"] for b in late)
+    if en < min_side or ln < min_side:
+        return {"direction": None, "reason": "gathering"}
+    em = sum(b["accuracy"] * b["n"] for b in early) / en
+    lm = sum(b["accuracy"] * b["n"] for b in late) / ln
+    delta = lm - em
+    direction = "up" if delta >= 0.05 else ("down" if delta <= -0.05 else "flat")
+    return {"direction": direction, "early_acc": round(em, 3), "late_acc": round(lm, 3),
+            "early_n": en, "late_n": ln, "delta": round(delta, 3)}
+
+
 def cmd_calibration(args: argparse.Namespace) -> int:
     """
     Which heads have enough graded rows to fit confidence floors? Reads the
@@ -3780,6 +3909,7 @@ def cmd_calibration(args: argparse.Namespace) -> int:
                     "predicted": predicted,
                     "confidence": r.get("predicted_confidence"),
                     "actual": r.get("actual"),
+                    "ts": r.get("ts"),
                 })
                 n += 1
         return n
@@ -3815,19 +3945,28 @@ def cmd_calibration(args: argparse.Namespace) -> int:
             ok = sum(1 for r in inbin if str(r["predicted"]) == str(r["actual"]))
             curve.append({"bin": [lo, lo + 0.25], "n": len(inbin), "accuracy": round(ok / len(inbin), 3) if inbin else None})
         qualifies = n >= args.min_rows and span >= args.min_span
+        daily = _daily_series(graded)
         report.append({"task": task, "head": head_id, "provider": provider,
                        "n": n, "accuracy": round(correct / n, 3) if n else None,
-                       "span": span, "curve": curve, "qualifies_for_fit": qualifies})
+                       "span": span, "curve": curve, "daily": daily,
+                       "trend": _trend(daily), "qualifies_for_fit": qualifies})
 
     if args.format == "json":
         print(json.dumps({"sources": {"dev-decisions": n_dd, "sys1": n_sys1}, "groups": report}, indent=2))
         return EXIT_OK
 
+    arrow = {"up": "\u25b2", "down": "\u25bc", "flat": "\u00b7", None: ""}
     print(f"Calibration: {n_dd} rows from dev-decisions, {n_sys1} from the sys1 store")
-    print(f"{'task':<22} {'head':<24} {'provider':<12} {'n':>4} {'acc':>6} {'span':>5}  fit?")
+    print(f"{'task':<22} {'head':<24} {'provider':<12} {'n':>4} {'acc':>6} {'span':>5}  trend  fit?")
     for g in report:
+        t = g.get("trend") or {}
+        suffix = ""
+        if t.get("direction"):
+            suffix = f"{arrow[t['direction']]} {t.get('early_acc')} -> {t.get('late_acc')}"
+        elif t.get("reason") == "gathering":
+            suffix = "gathering"
         print(f"{g['task']:<22} {g['head']:<24} {g['provider']:<12} {g['n']:>4} "
-              f"{str(g['accuracy']):>6} {g['span']:>5}  {'YES' if g['qualifies_for_fit'] else ''}")
+              f"{str(g['accuracy']):>6} {g['span']:>5}  {suffix:<14} {'YES' if g['qualifies_for_fit'] else ''}")
     return EXIT_OK
 
 

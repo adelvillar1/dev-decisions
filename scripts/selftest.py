@@ -15,6 +15,8 @@ Covers the pieces the grading session proved load-bearing:
     sent any diff mentioning '.md' to docs_drift).
   - _disposition_feedback_rows: fixed/waived keep actual=predicted,
     overridden inverts yes/no heads and nulls choice heads.
+  - _daily_series/_trend: calibration drift bucketing and the early-vs-late
+    direction guard (gathering until both halves have >= 3 rows).
 """
 
 from __future__ import annotations
@@ -153,6 +155,50 @@ class TestDispositionFeedbackRows(unittest.TestCase):
 
     def test_row_without_sha_is_skipped(self):
         self.assertEqual(dd._disposition_feedback_rows("fixed", {"heads": {}}, None), [])
+
+
+class TestDailySeries(unittest.TestCase):
+    def test_buckets_two_days_with_accuracy(self):
+        rows = [{"ts": "2026-10-01T10:00:00+00:00", "predicted": "yes", "actual": "yes"},
+                {"ts": "2026-10-01T11:00:00+00:00", "predicted": "yes", "actual": "no"},
+                {"ts": "2026-10-02T10:00:00+00:00", "predicted": "yes", "actual": "yes"},
+                {"ts": "2026-10-02T11:00:00+00:00", "predicted": "yes", "actual": "yes"}]
+        daily = dd._daily_series(rows)
+        self.assertEqual([b["date"] for b in daily], ["2026-10-01", "2026-10-02"])
+        self.assertEqual(daily[0]["accuracy"], 0.5)
+        self.assertEqual(daily[1]["accuracy"], 1.0)
+
+    def test_rows_without_actual_or_ts_excluded(self):
+        rows = [{"ts": "2026-10-01T10:00:00+00:00", "predicted": "yes", "actual": None},
+                {"predicted": "yes", "actual": "yes"}]
+        self.assertEqual(dd._daily_series(rows), [])
+
+    def test_days_cap_keeps_latest(self):
+        rows = [{"ts": f"2026-09-{str(d).zfill(2)}T10:00:00+00:00", "predicted": "a",
+                 "actual": "a"} for d in range(1, 11)]
+        daily = dd._daily_series(rows, days=5)
+        self.assertEqual(len(daily), 5)
+        self.assertEqual(daily[-1]["date"], "2026-09-10")
+
+
+class TestTrend(unittest.TestCase):
+    def test_up_when_late_improves(self):
+        daily = [{"date": "2026-10-01", "n": 3, "accuracy": 0.5},
+                 {"date": "2026-10-02", "n": 3, "accuracy": 0.9}]
+        t = dd._trend(daily)
+        self.assertEqual(t["direction"], "up")
+        self.assertEqual((t["early_n"], t["late_n"]), (3, 3))
+
+    def test_gathering_until_both_halves_have_three(self):
+        t = dd._trend([{"date": "2026-10-01", "n": 2, "accuracy": 0.5},
+                       {"date": "2026-10-02", "n": 2, "accuracy": 1.0}])
+        self.assertIsNone(t["direction"])
+        self.assertEqual(t["reason"], "gathering")
+
+    def test_flat_inside_band(self):
+        daily = [{"date": "2026-10-01", "n": 3, "accuracy": 0.8},
+                 {"date": "2026-10-02", "n": 3, "accuracy": 0.82}]
+        self.assertEqual(dd._trend(daily)["direction"], "flat")
 
 
 class TestFeedbackRowShape(unittest.TestCase):
