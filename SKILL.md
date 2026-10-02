@@ -19,6 +19,8 @@ dev-decisions status --root ~/code      # scan a different root
 # PR gating
 dev-decisions pr-gate [branch] --dry-run
 dev-decisions pr-gate 123 --provider local
+dev-decisions pr-gate --fanout --dry-run     # per-file heads packed into ONE request
+dev-decisions pr-gate --diff-file patch.diff --fanout   # offline; never applies labels
 
 # Issue triage (dry-run by default)
 dev-decisions triage-issues [owner/repo] --limit 20
@@ -55,13 +57,13 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD.jsonl` is the 
 
 1. `dev-decisions install-hooks <repo>` — installs pre-commit (scan-staged, local, no keys) and pre-push (classify-diff) from `hooks.*` config. Hooks source the machine-global key file, so a fresh repo needs no per-repo config.
 2. Keys: one file, `~/.config/dev-decisions/env` (`chmod 600`, `FASTINO_API_KEY=...` / `TYPESAFE_API_KEY=...` lines) — created once per machine; `install-hooks` wires every managed hook to source it with `set -a`. Never commit it, never put keys in the hook file itself.
-3. Nothing else. The hook classifies every push through sys1's `decide` provider; without keys it degrades to warn-and-proceed (fail-open by design); sensitive repos skip vendor calls unless `--allow-vendor`.
+3. Nothing else. The hook classifies every push through sys1's router (`auto`: the roster chain glide→drex→jev from sys1 config); without keys it degrades to warn-and-proceed (fail-open by design); sensitive repos skip vendor calls unless `--allow-vendor`.
 
 Use this when onboarding a new machine (keys file + `bulk-install`), after cloning a batch of repos, or when adding a project to your `~/Projects` directory.
 
 ## Provider routing
 
-**Active-provider policy (2026-09-28): hosted Fastino (`decide`) and TypeSafe Jev (`jev`) are the only active providers.** Local GLiNER is supported by design but not encouraged (its wire drops head instructions; nothing critical relies on it). Additional hosted APIs are explored before inclusion.
+**Default provider is `auto` (2026-10-02): every command routes through sys1's router** — the capacity gate, per-task overrides, and the roster chain (`glide,drex,jev`) all live in sys1's config, so dev-decisions tracks the roster without code changes here. Explicit ids still pin a provider. Two measured facts make routing load-bearing: **hosted Decide rejects diffs past its 8192-token context** (`input_too_long` — long diffs must ride glide/drex/jev), and **GLiDE times out server-side on multi-head fan-out over large states** (hence `pr_gate_fanout = "jev"` by_task override in `~/.config/sys1/config.toml`). Without sys1 installed, auto falls back to decide. Local GLiNER stays supported-by-design, offline/private repos only. Roster and measured provider facts: the `sys1-provider-pool` skill.
 
 | Job | Provider | Why |
 |---|---|---|
@@ -119,7 +121,11 @@ Both providers return confidence. The JEV-as-a-Judge paper's finding applies: **
 ```bash
 dev-decisions pr-gate [branch] --dry-run
 dev-decisions pr-gate 123 --provider local
+dev-decisions pr-gate --fanout --dry-run
+dev-decisions pr-gate --diff-file patch.diff --fanout
 ```
+
+**`--fanout` (speculative fan-out):** packs a risky Noul + action Choice per changed file (cap 12, largest chunks first) into the SAME request as the standard diff_type/risk_tier/labels heads — 19 heads in one call, measured *faster* than the 3-head call, with per-file verdicts printed. Requires sys1; routes to `jev` via by_task override. `--diff-file` reads any unified diff offline and never applies labels. Overall labels always come only from the three standard heads — per-file action choices never become PR labels.
 
 Labels applied: `bug`, `feature`, `refactor`, `docs`, `chore`, `test`, `ci` (multi-label).
 
@@ -223,7 +229,7 @@ Key flags:
 - `block_on_classification`: false in v1 (advisory); flip once you have calibration data.
 - `confidence_floor`: 0.7 by default.
 - `max_diff_chars`: 12000 by default.
-- `provider`: `decide` | `jev` | `local` | `both`.
+- `provider`: `auto` (default; sys1 router) | `decide` | `jev` | `glide` | `drex` | `local` | `both`.
 - `local_venv`: path to the gliner2 venv (default `/private/tmp/gliner-decide`).
 - `local_model`: Hugging Face model id (default `fastino/GLiNER2.5-Decide`).
 - `gate.advisory_only`: true = warn+proceed; false = block.
@@ -266,7 +272,7 @@ After a few weeks, the JSONL log contains (input, model, confidence, human-outco
 - Python 3.10+ (stdlib-only core)
 - git
 - `gh` CLI (for PR gating and issue triage)
-- For hosted providers: `FASTINO_API_KEY` and/or `TYPESAFE_API_KEY` env vars
+- For hosted providers: `FASTINO_API_KEY` and/or `TYPESAFE_API_KEY` env vars (`LIQUID_API_KEY` for the d1 backup; Drex's key lives in the second-brain project config)
 - For local provider: `gliner2` installed in a compatible venv
 
 ## License
