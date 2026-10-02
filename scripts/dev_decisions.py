@@ -2470,6 +2470,8 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
 
 _PLAN_GATE_MAX_CRITERIA = 12
 _PLAN_GATE_MAX_SECTIONS = 14
+_PLAN_GATE_MAX_TEST_FILES = 20
+_PLAN_GATE_TESTS_PER_FILE = 12
 _PLAN_GATE_SECTION_CHARS = 2000
 # Meta sections carry no proposed work; scope-creep heads would false-flag them.
 _PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes")
@@ -2541,6 +2543,31 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     all_sections = _parse_plan_sections(text)
     sections = [(h, b) for h, b in all_sections if not any(k in h.lower() for k in _PLAN_GATE_SKIP_SECTIONS)][:_PLAN_GATE_MAX_SECTIONS]
 
+    # Test inventory (mechanical collection; sys1 only does the semantic matching)
+    test_root = getattr(args, "tests", None)
+    test_files: list[tuple[str, list[str]]] = []
+    test_files_total = 0
+    if test_root:
+        root = Path(test_root)
+        if not root.exists():
+            print(f"error: --tests root not found: {root}", file=sys.stderr)
+            return EXIT_ERROR
+        skip_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__"}
+        for p in sorted(root.rglob("*.py")):
+            if skip_dirs & set(p.parts):
+                continue
+            if not (p.name.startswith("test_") or p.name.endswith("_test.py")):
+                continue
+            try:
+                tests = re.findall(r"^\s*def (test_\w+)", p.read_text(), re.M)
+            except Exception:
+                continue
+            if tests:
+                test_files.append((str(p.relative_to(root)), tests))
+        test_files_total = len(test_files)
+        if test_files_total > _PLAN_GATE_MAX_TEST_FILES:
+            test_files = test_files[:_PLAN_GATE_MAX_TEST_FILES]  # overflow noted in the report
+
     heads: list = []
     for i, c in enumerate(criteria):
         heads.append(sys1.make_noul(
@@ -2559,12 +2586,27 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
         heads.append(sys1.make_noul(
             f"Does at least one acceptance criterion (C0..C{len(criteria) - 1} listed in the state) require the work described in section s{j} ({h})?",
             id=f"s{j}_in_scope"))
+    test_options: dict[str, str] = {}
+    if test_files:
+        test_options = {f"tf{j}": f"{rel} — {len(ts)} tests ({', '.join(ts[:6])}{'…' if len(ts) > 6 else ''})" for j, (rel, ts) in enumerate(test_files)}
+        test_options["none"] = "No test in the inventory exercises this criterion."
+        for i, c in enumerate(criteria):
+            heads.append(sys1.make_noul(
+                f"Does the test inventory in the state contain tests that verify the behavior acceptance criterion C{i} describes? Criterion: {c}",
+                id=f"t{i}_tested"))
+            heads.append(sys1.make_choice(
+                f"Which test file best matches acceptance criterion C{i}?",
+                list(test_options.keys()), id=f"t{i}_where", descriptions=test_options))
 
     parts = [f"A development plan with {len(criteria)} acceptance criteria (C0..C{len(criteria) - 1}) and {len(sections)} work sections (s0..s{len(sections) - 1})."]
     for i, c in enumerate(criteria):
         parts.append(f"C{i}: {c}")
     for j, (h, b) in enumerate(sections):
         parts.append(f"=== SECTION s{j}: {h} ===\n{b[:_PLAN_GATE_SECTION_CHARS]}")
+    if test_files:
+        parts.append(f"TEST INVENTORY — {len(test_files)} test files (ids tf0..tf{len(test_files) - 1}):")
+        for j, (rel, ts) in enumerate(test_files):
+            parts.append(f"tf{j} = {rel} ({len(ts)} tests): {', '.join(ts[:_PLAN_GATE_TESTS_PER_FILE])}{'…' if len(ts) > _PLAN_GATE_TESTS_PER_FILE else ''}")
     if overflow:
         parts.append("Criteria beyond the head limit have no heads; context only: " + " | ".join(overflow))
     state = "\n\n".join(parts)[: cfg["scan"]["max_diff_chars"]]
@@ -2612,10 +2654,27 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     print(f"  scope: {len(sections) - len(creep)}/{len(sections)} in scope")
     for line in creep:
         print(line)
+    untested: list[int] = []
+    if test_files:
+        print(f"  test coverage: {len(criteria)} criteria vs {len(test_files)} test files" + (f" ({test_files_total} found)" if test_files_total > len(test_files) else ""))
+        for i, c in enumerate(criteria):
+            p = _noul_p(f"t{i}_tested")
+            where = (answers.get(f"t{i}_where") or {}).get("label") or ""
+            rel = ""
+            if where.startswith("tf"):
+                try:
+                    rel = test_files[int(where[2:])][0]
+                except (IndexError, ValueError):
+                    rel = where
+            if p is not None and p >= 0.5 and rel:
+                print(f"    C{i} -> {rel}")
+            else:
+                untested.append(i)
+                print(f"    [UNTESTED]    C{i}  {c[:100]}")
     if overflow:
         print(f"  (no heads for {len(overflow)} more criteria)")
 
-    gaps = bool(missing or unverifiable or creep)
+    gaps = bool(missing or unverifiable or creep or untested)
     log_record({
         "op": "plan-gate",
         "plan": str(plan_path),
@@ -2625,6 +2684,8 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
         "sections": len(sections),
         "uncovered": [i for i in range(len(criteria)) if (_noul_p(f"c{i}_covered") or 0) < 0.5],
         "creep_sections": [j for j in range(len(sections)) if (_noul_p(f"s{j}_in_scope") or 0) < 0.5],
+        "untested_criteria": untested,
+        "test_files": len(test_files),
         "verdict": "gaps" if gaps else "pass",
         "latency_ms": used_latency,
         "telemetry": result.telemetry.get(used_provider, {}),
@@ -3741,6 +3802,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("plan", help="Path to the plan markdown file")
     sp.add_argument("--criteria-file", default=None,
                     help="External requirements file (default: checkbox lines in the plan itself)")
+    sp.add_argument("--tests", default=None,
+                    help="Test root directory: collect pytest-style test files and score each criterion against the suite")
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_plan_gate)

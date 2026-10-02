@@ -140,7 +140,10 @@ Labels applied: `bug`, `feature`, `refactor`, `docs`, `chore`, `test`, `ci` (mul
 ```bash
 dev-decisions plan-gate docs/plans/2026-10-02-feature.md
 dev-decisions plan-gate plan.md --criteria-file requirements.txt
+dev-decisions plan-gate plan.md --tests tests/    # + criteria-vs-test-suite coverage
 ```
+
+**`--tests <root>` (test coverage):** mechanically collects pytest-style test files (`test_*.py`/`*_test.py`, test function names) under the root, then matches each criterion to the suite in the same request — matched criteria print `C<i> -> <test file>`, unmatched print UNTESTED. Operational criteria (copy a key, run a live check) and retrospective criteria (record results in the Outcome) correctly come back UNTESTED: that is the manual/E2E bucket, not a failure. Counting is code; the model only matches meaning. Mechanical line/branch coverage remains the floor — this gate judges semantic coverage, and a criterion matched to a vacuous test is a known blind spot (assertion-depth checking is future work).
 
 **Coverage ≠ correctness:** a flag is a review trigger, not a veto — borderline probabilities (roughly 0.3–0.6) mean escalate to human, and the gate is advisorial by design until floors are fitted from JSONL outcomes (`op: "plan-gate"` rows, hand-graded; ~20 plans to calibration).
 
