@@ -32,6 +32,9 @@ dev-decisions evidence-gate plan.md closeout-evidence.md
 # Architecture gating (plan vs documented architecture)
 dev-decisions arch-gate docs/plans/2026-10-02-feature.md
 
+# Record the human decision on a negative gate verdict
+dev-decisions disposition plan-gate docs/plans/2026-10-02-feature.md --status waived --reason "criterion 6 deferred to the follow-up plan"
+
 # Issue triage (dry-run by default)
 dev-decisions triage-issues [owner/repo] --limit 20
 dev-decisions triage-issues --state all --dry-run
@@ -280,6 +283,24 @@ Key flags:
 - `local_venv`: path to the gliner2 venv (default `/private/tmp/gliner-decide`).
 - `local_model`: Hugging Face model id (default `fastino/GLiNER2.5-Decide`).
 - `gate.advisory_only`: true = warn+proceed; false = block.
+
+## Dispositions (HITL record)
+
+Gates are advisorial, but a negative verdict must end in a **recorded human decision** — that is what makes the advice layer load-bearing. Ignoring a flag silently is the failure mode this exists to prevent.
+
+```bash
+dev-decisions disposition <gate> <target> --status fixed
+dev-decisions disposition <gate> <target> --status waived --reason "criterion deferred to plan X"
+dev-decisions disposition <gate> <target> --status overridden --reason "gate misread the diff; the call is guarded upstream"
+```
+
+- `fixed` — the flag was right; the item was reworked.
+- `waived` — proceeding despite the flag; **reason required**.
+- `overridden` — the gate was wrong (model error); **reason required**.
+
+Policy (2026-10-02): negatives **gate status transitions** — a plan with undispositioned gate flags stays `draft`, a close-out with NOT SUPPORTED evidence stays `active`. Waive/override reasons are the calibration signal: a gate with a recurring override pattern needs rework, and a stable low override rate is what earns the flip from advisorial to blocking (per gate, per the `block_on_classification` / `advisory_only` flags).
+
+**Safety exception:** destructive AND irreversible commands hard-block in `zcode-gate` regardless of `advisory_only` — no disposition waives that in-band; rerun without the destructive form.
 
 ## JSONL schema
 

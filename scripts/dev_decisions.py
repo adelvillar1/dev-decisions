@@ -1864,31 +1864,58 @@ def cmd_zcode_gate(args: argparse.Namespace) -> int:
         reversible = "unknown"
         reversible_conf = None
 
-        # Run safety task via local provider (fast, fully local) to check reversibility
+        # Run the safety task through sys1's router (hosted roster; local
+        # providers are out of the pool). Without sys1, reversibility stays
+        # unknown and the high-stakes regex rule decides.
         try:
+            safety_telemetry: dict = {}
+            safety_result: dict = {}
+            reversible_p: float | None = None
             if sys1 is not None:
-                safety_telemetry: dict = {}
-                safety_result = {}
-                single = _sys1_classify_single("local", "safety", git_cmd, cfg)
+                single = _sys1_classify_single("auto", "safety", git_cmd, cfg)
                 safety_result = single.get("answers", {})
                 safety_telemetry = single.get("telemetry", {})
-            else:
-                heads = get_task_heads("safety", "local")
-                safety_telemetry = {}
-                safety_result = _call_local_provider(git_cmd, heads, cfg, telemetry=safety_telemetry)
             for key, val in safety_result.items():
-                if isinstance(val, dict):
-                    label = val.get("label") or val.get("noul") or val.get("score")
-                    conf = val.get("confidence")
-                    if label:
-                        if "reversible" in key.lower():
-                            reversible = label if isinstance(label, str) else str(label)
-                            reversible_conf = conf
+                if isinstance(val, dict) and "reversible" in key.lower():
+                    if isinstance(val.get("noul"), (int, float)):
+                        reversible_p = float(val["noul"])
+                        reversible = f"P(reversible)={reversible_p:.2f}"
+                    else:
+                        label = val.get("label")
+                        if label:
+                            reversible = str(label)
+                            reversible_conf = val.get("confidence")
         except Exception as e:
             print(f"[gate] safety task failed: {e} — reversibility unknown", file=sys.stderr)
 
         print(f"[gate] safety task: DESTRUCTIVE (reversible={reversible})", file=sys.stderr)
         reason = f"Destructive operation detected (reversible={reversible})."
+
+        # HITL policy (2026-10-02): destructive AND more-likely-irreversible
+        # hard-blocks regardless of advisory_only — the only verdict with no
+        # favorable cost asymmetry to trade. When the safety model cannot
+        # refine reversibility, the high-stakes patterns still hard-block
+        # (presumed irreversible); lower-stakes destructive hits stay advisory.
+        _high_stakes = any(p in destructive_hits for p in (
+            r"git\s+push\s+.*--force", r"DROP\s+TABLE", r"TRUNCATE\s+TABLE", r"kubectl\s+delete"))
+        irreversible = (reversible_p is not None and reversible_p < 0.5) or (
+            reversible_p is None and str(reversible).lower() in ("no", "false"))
+        if irreversible or (_high_stakes and reversible_p is None and reversible == "unknown"):
+            why = "destructive AND irreversible" if irreversible else "high-stakes destructive, reversibility unknown"
+            print(f"[gate] BLOCKED: {why} — human decision required. Rework the command, or run it manually if you accept the loss.", file=sys.stderr)
+            log_record({
+                "op": "zcode-gate",
+                "tool": tool,
+                "command": git_cmd[:200],
+                "verdict": "block",
+                "policy": "hitl-irreversible",
+                "destructive": True,
+                "reversible": reversible,
+                "reversible_confidence": reversible_conf,
+                "advisory_only": advisory_only,
+            })
+            return EXIT_BLOCK
+
         if advisory_only:
             print(f"[gate] advisory_only=true — proceeding with warning: {reason}", file=sys.stderr)
             log_record({
@@ -3215,6 +3242,35 @@ def cmd_arch_gate(args: argparse.Namespace) -> int:
     return EXIT_WARN if drifts else EXIT_OK
 
 
+def cmd_disposition(args: argparse.Namespace) -> int:
+    """
+    Record the human decision on a negative gate verdict — the HITL contract
+    that makes advisorial gates load-bearing:
+      fixed       the flagged item was reworked; the gate was right.
+      waived      consciously proceeding despite the flag; reason required.
+      overridden  the gate was wrong (model error); reason required.
+    Waive/override reasons are the calibration signal: a gate with a recurring
+    override pattern needs rework, and a low override rate is what earns a
+    gate the flip from advisorial to blocking.
+    """
+    if args.status not in ("fixed", "waived", "overridden"):
+        print("error: --status must be fixed | waived | overridden", file=sys.stderr)
+        return EXIT_ERROR
+    if args.status in ("waived", "overridden") and not (args.reason or "").strip():
+        print(f"error: --reason is required for {args.status} dispositions — the reason is the calibration signal.", file=sys.stderr)
+        return EXIT_ERROR
+    log_record({
+        "op": "disposition",
+        "gate": args.gate,
+        "target": args.target,
+        "status": args.status,
+        "reason": (args.reason or "").strip(),
+        "decided_by": getattr(args, "by", None) or os.environ.get("USER", "user"),
+    })
+    print(f"disposition recorded: {args.gate} {args.target} -> {args.status}")
+    return EXIT_OK
+
+
 def cmd_triage_issues(args: argparse.Namespace) -> int:
     """Batch-classify issues and apply labels."""
     repo = getattr(args, "repo", None)
@@ -4355,6 +4411,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_evidence_gate)
+
+    # disposition
+    sp = sub.add_parser("disposition", help="Record the human decision on a negative gate verdict (fixed / waived / overridden)")
+    sp.add_argument("gate", help="Gate op: plan-gate | arch-gate | pr-gate | evidence-gate | docs-gate | zcode-gate")
+    sp.add_argument("target", help="What the verdict was about (plan path, PR number, command)")
+    sp.add_argument("--status", required=True, choices=["fixed", "waived", "overridden"],
+                    help="fixed = gate was right and item reworked; waived = proceeding despite flag; overridden = gate was wrong")
+    sp.add_argument("--reason", default=None, help="Required for waived/overridden — the calibration signal")
+    sp.add_argument("--by", default=None, help="Who decided (default: $USER)")
+    sp.set_defaults(func=cmd_disposition)
 
     # triage-issues
     sp = sub.add_parser("triage-issues", help="Batch-classify issues and apply labels")
