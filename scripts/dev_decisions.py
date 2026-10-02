@@ -2472,6 +2472,9 @@ _PLAN_GATE_MAX_CRITERIA = 12
 _PLAN_GATE_MAX_SECTIONS = 14
 _PLAN_GATE_MAX_TEST_FILES = 20
 _PLAN_GATE_TESTS_PER_FILE = 12
+_EVIDENCE_GATE_MAX_CRITERIA = 12
+_EVIDENCE_BLOCK_CHARS = 1500
+_EVIDENCE_VERDICTS = ("supported", "insufficient", "contradicted")
 _PLAN_GATE_SECTION_CHARS = 2000
 # Meta sections carry no proposed work; scope-creep heads would false-flag them.
 _PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes")
@@ -2691,6 +2694,140 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
         "telemetry": result.telemetry.get(used_provider, {}),
     })
     print(f"  verdict: {'GAPS' if gaps else 'PASS'}")
+    return EXIT_WARN if gaps else EXIT_OK
+
+
+def _parse_evidence_blocks(text: str) -> dict[str, str]:
+    """Parse '== C<i> ==' tagged evidence blocks into {id: text} (bounded per block)."""
+    blocks: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        m = re.match(r"^\s*==\s*(C\d+)\s*==", line)
+        if m:
+            current = m.group(1)
+            blocks.setdefault(current, [])
+            continue
+        if current is not None:
+            blocks[current].append(line)
+    out: dict[str, str] = {}
+    for k, lines in blocks.items():
+        joined = "\n".join(lines).strip()
+        if joined:
+            out[k] = joined[:_EVIDENCE_BLOCK_CHARS]
+    return out
+
+
+def cmd_evidence_gate(args: argparse.Namespace) -> int:
+    """
+    QA evidence gate for close-out: does the collected evidence support a pass
+    per acceptance criterion? Three verdicts per criterion: supported,
+    insufficient, contradicted. Fail-closed — a criterion without evidence is
+    never a pass, and the gate downgrades passes but never overturns a
+    deterministic failure (a red test stays red; this gate judges evidence).
+    """
+    plan_path = Path(args.plan)
+    evidence_path = Path(args.evidence)
+    if not plan_path.exists():
+        print(f"error: plan not found: {plan_path}", file=sys.stderr)
+        return EXIT_ERROR
+    if not evidence_path.exists():
+        print(f"error: evidence file not found: {evidence_path}", file=sys.stderr)
+        return EXIT_ERROR
+    if sys1 is None:
+        print("error: evidence-gate requires sys1", file=sys.stderr)
+        return EXIT_ERROR
+
+    text = plan_path.read_text()
+    criteria = _parse_plan_criteria(text)[:_EVIDENCE_GATE_MAX_CRITERIA]
+    if not criteria:
+        print("error: no acceptance criteria found in plan (checkbox lines).", file=sys.stderr)
+        return EXIT_ERROR
+    blocks = _parse_evidence_blocks(evidence_path.read_text())
+    judged = [i for i in range(len(criteria)) if f"C{i}" in blocks]
+    no_evidence = [i for i in range(len(criteria)) if f"C{i}" not in blocks]
+    if not judged:
+        print("error: no evidence blocks found. Tag them '== C0 ==' etc., matching the plan's checkbox order.", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+
+    heads: list = []
+    for i in judged:
+        heads.append(sys1.make_noul(
+            f"Does the evidence for criterion C{i} demonstrate the criterion's observable outcome? Criterion: {criteria[i]}",
+            id=f"c{i}_sufficient"))
+        heads.append(sys1.make_noul(
+            f"Is the evidence for criterion C{i} free of contradictions with the claim (skipped tests, wrong build or environment, errors the summary ignored, retried-until-pass)?",
+            id=f"c{i}_consistent"))
+        heads.append(sys1.make_choice(
+            f"Verdict for criterion C{i} based on its evidence?",
+            list(_EVIDENCE_VERDICTS),
+            id=f"c{i}_verdict",
+            descriptions={
+                "supported": "The evidence demonstrates the outcome with no contradictions.",
+                "insufficient": "The evidence does not fully demonstrate the outcome; more is needed.",
+                "contradicted": "The evidence contains contradictions with the claim.",
+            }))
+
+    parts = [f"QA close-out for a plan with {len(criteria)} acceptance criteria (C0..C{len(criteria) - 1}). Evidence blocks tagged == C<i> == follow."]
+    for i, c in enumerate(criteria):
+        parts.append(f"C{i}: {c}")
+    for i in judged:
+        parts.append(f"=== EVIDENCE C{i} ===\n{blocks[f'C{i}']}")
+    state = "\n\n".join(parts)[: cfg["scan"]["max_diff_chars"]]
+
+    task = sys1.types.Task(id="evidence_gate", heads=heads, description="QA evidence sufficiency/consistency gate (fail-closed)")
+    chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("jev")
+    result = sys1.classify(chain, task, state, cfg=cfg, log=False)
+    answers: dict = {}
+    used_provider = chain[0] if chain else ""
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        if result.answers.get(mapped):
+            answers = result.answers[mapped]
+            used_provider = mapped
+            break
+    if not answers:
+        print(f"error: no provider answered (chain: {', '.join(chain)})", file=sys.stderr)
+        return EXIT_ERROR
+
+    def _noul_p(head_id: str):
+        a = answers.get(head_id) or {}
+        p = a.get("noul")
+        return p if isinstance(p, (int, float)) else None
+
+    print(f"Evidence gate: {plan_path.name} vs {evidence_path.name}  (provider={used_provider}, {result.latency_ms} ms, {len(judged)} judged, {len(no_evidence)} without evidence)")
+    not_supported: list[tuple[int, str]] = []
+    for i in range(len(criteria)):
+        if i in no_evidence:
+            print(f"    C{i}: NO EVIDENCE   {criteria[i][:100]}")
+            not_supported.append((i, "no-evidence"))
+            continue
+        s = _noul_p(f"c{i}_sufficient")
+        con = _noul_p(f"c{i}_consistent")
+        v = (answers.get(f"c{i}_verdict") or {}).get("label") or "insufficient"
+        s_s = f"{s:.2f}" if isinstance(s, (int, float)) else "----"
+        c_s = f"{con:.2f}" if isinstance(con, (int, float)) else "----"
+        print(f"    C{i}: {v.upper():<12} (sufficiency={s_s}, consistency={c_s})  {criteria[i][:90]}")
+        if v != "supported":
+            not_supported.append((i, v))
+
+    gaps = bool(not_supported)
+    log_record({
+        "op": "evidence-gate",
+        "plan": str(plan_path),
+        "evidence": str(evidence_path),
+        "provider": used_provider,
+        "task": "evidence_gate",
+        "judged": len(judged),
+        "no_evidence": no_evidence,
+        "not_supported": not_supported,
+        "verdict": "not-supported" if gaps else "supported",
+        "latency_ms": result.latency_ms,
+        "telemetry": result.telemetry.get(used_provider, {}),
+    })
+    print(f"  verdict: {'NOT SUPPORTED' if gaps else 'SUPPORTED'}")
     return EXIT_WARN if gaps else EXIT_OK
 
 
@@ -3807,6 +3944,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_plan_gate)
+
+    # evidence-gate
+    sp = sub.add_parser("evidence-gate", help="Gate QA evidence per acceptance criterion (fail-closed close-out check)")
+    sp.add_argument("plan", help="Path to the plan markdown file (checkbox order defines C<i>)")
+    sp.add_argument("evidence", help="Evidence file with '== C<i> ==' tagged blocks (commands, log tails, outputs)")
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
+                    help="Override config provider")
+    sp.set_defaults(func=cmd_evidence_gate)
 
     # triage-issues
     sp = sub.add_parser("triage-issues", help="Batch-classify issues and apply labels")

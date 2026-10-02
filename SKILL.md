@@ -26,6 +26,9 @@ dev-decisions pr-gate --diff-file patch.diff --fanout   # offline; never applies
 dev-decisions plan-gate docs/plans/2026-10-02-feature.md
 dev-decisions plan-gate plan.md --criteria-file requirements.txt
 
+# Evidence gating (QA close-out)
+dev-decisions evidence-gate plan.md closeout-evidence.md
+
 # Issue triage (dry-run by default)
 dev-decisions triage-issues [owner/repo] --limit 20
 dev-decisions triage-issues --state all --dry-run
@@ -146,6 +149,18 @@ dev-decisions plan-gate plan.md --tests tests/    # + criteria-vs-test-suite cov
 **`--tests <root>` (test coverage):** mechanically collects pytest-style test files (`test_*.py`/`*_test.py`, test function names) under the root, then matches each criterion to the suite in the same request — matched criteria print `C<i> -> <test file>`, unmatched print UNTESTED. Operational criteria (copy a key, run a live check) and retrospective criteria (record results in the Outcome) correctly come back UNTESTED: that is the manual/E2E bucket, not a failure. Counting is code; the model only matches meaning. Mechanical line/branch coverage remains the floor — this gate judges semantic coverage, and a criterion matched to a vacuous test is a known blind spot (assertion-depth checking is future work).
 
 **Coverage ≠ correctness:** a flag is a review trigger, not a veto — borderline probabilities (roughly 0.3–0.6) mean escalate to human, and the gate is advisorial by design until floors are fitted from JSONL outcomes (`op: "plan-gate"` rows, hand-graded; ~20 plans to calibration).
+
+## Evidence gating
+
+`evidence-gate` is the QA close-out check: does the collected evidence support a pass per acceptance criterion? A green exit code is weak evidence; this gate grades the bundle. Criteria come from the plan's checkboxes (order defines C<i>); evidence is a plain file with blocks tagged `== C0 ==`, `== C1 ==`, … containing commands, log tails, and outputs (bounded ~1500 chars/block).
+
+```bash
+dev-decisions evidence-gate docs/plans/2026-10-02-feature.md closeout-evidence.md
+```
+
+Per criterion with evidence: **sufficiency** noul (does it demonstrate the observable outcome), **consistency** noul (free of contradictions — skips, wrong build, errors the summary ignored, retried-until-pass), and a verdict choice (supported / insufficient / contradicted). Criteria without an evidence block come back NO EVIDENCE.
+
+**Fail-closed rules:** missing evidence is never a pass; the gate downgrades passes but never overturns a deterministic failure (a red test stays red — this judges evidence, not the test). Advisorial until calibrated; JSONL rows (`op: "evidence-gate"`) are hand-graded when later evidence contradicts a SUPPORTED verdict.
 
 ## Issue triage
 
