@@ -220,6 +220,35 @@ class TestUxCorpus(unittest.TestCase):
             self.assertEqual(c["states"]["sparse"], "empty states render")
             self.assertIn("stat cards row", c["controls"])
 
+    def test_transitions_and_flow(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "index.md").write_text(
+                "# UX contract\n## States\n- [ ] has-data: cockpit populated\n\n"
+                "## Transitions\n- open gates -> `gates`\n")
+            (Path(td) / "gates.md").write_text(
+                "# UX contract\n## States\n- [ ] has-data: inbox\n- [ ] sparse: empty\n\n"
+                "## Transitions\n- open summary -> `summary`\n")
+            (Path(td) / "reports.md").write_text(
+                "# UX contract\n## States\n- [ ] has-data: conflicts\n")
+            contracts = [dd._parse_ux_contract(Path(td) / f"{n}.md")
+                         for n in ("index", "gates", "reports")]
+            route_names = {c["route"] for c in contracts}
+            undefined, outbounds, inbounds = [], {}, {}
+            for c in contracts:
+                for t in c.get("transitions", []):
+                    if t["to"] not in route_names:
+                        undefined.append(f"{c['route']}: {t['action']} -> {t['to']}")
+                    outbounds[c["route"]] = outbounds.get(c["route"], 0) + 1
+                    inbounds[t["to"]] = inbounds.get(t["to"], 0) + 1
+            orphans = [c["route"] for c in contracts
+                       if inbounds.get(c["route"], 0) == 0 and c["route"] != "index"]
+            # dead end: reachable but nothing to leave by (no state-count guard)
+            dead = [c["route"] for c in contracts
+                    if inbounds.get(c["route"], 0) > 0 and outbounds.get(c["route"], 0) == 0]
+            self.assertEqual(undefined, ["gates: open summary -> summary"])
+            self.assertEqual(orphans, ["reports"])
+            self.assertEqual(dead, [])  # reports is unreachable: orphan, not dead end
+
     def test_flags_normalization_and_drift(self):
         with tempfile.TemporaryDirectory() as td:
             flags_dir = Path(td)

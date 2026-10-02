@@ -3930,6 +3930,41 @@ def cmd_calibration(args: argparse.Namespace) -> int:
         key = (str(r["task"]), str(r.get("head_id") or "-"), str(r.get("provider") or "-"))
         groups.setdefault(key, []).append(r)
 
+    # jaggedness watch: across draw-carrying event rows, how often do heads
+    # come back unstable? (2026-10-02: single-draw plan-gate flags proved
+    # jagged; consistency merging now records per-head stability)
+    jag: dict = {}
+    for f in sorted(LOG_DIR.glob("20*/*/*/events.jsonl"), reverse=True)[:60]:
+        try:
+            for line in f.read_text().splitlines()[-400:]:
+                r = json.loads(line)
+                heads = r.get("heads")
+                if not isinstance(heads, dict):
+                    continue
+                # two shapes occur: provider-nested {prov: {head: answer}}
+                # and flat {head: answer} (plan-gate logs flat)
+                for prov, hd in heads.items():
+                    if not isinstance(hd, dict):
+                        continue
+                    if any(isinstance(a, dict) and "unstable" in a for a in hd.values()):
+                        inner = hd.items()
+                        task = str(r.get("task") or r.get("op"))
+                    else:
+                        inner = [(prov, hd)]
+                        task = str(r.get("task") or r.get("op"))
+                    for hid, a in inner:
+                        if isinstance(a, dict) and "unstable" in a:
+                            j = jag.setdefault((task, str(prov) if len(inner) > 1 or prov != hid else "flat"),
+                                               {"drawn": 0, "unstable": 0})
+                            j["drawn"] += 1
+                            j["unstable"] += 1 if a.get("unstable") else 0
+        except Exception:
+            continue
+    jaggedness = [{"task": k[0], "provider": k[1],
+                   "heads_drawn": v["drawn"],
+                   "unstable_rate": round(v["unstable"] / v["drawn"], 3) if v["drawn"] else None}
+                  for k, v in sorted(jag.items()) if v["drawn"]]
+
     report = []
     for (task, head_id, provider), rows in sorted(groups.items()):
         graded = [r for r in rows if r["predicted"] is not None and r["actual"] is not None]
@@ -3952,11 +3987,16 @@ def cmd_calibration(args: argparse.Namespace) -> int:
                        "trend": _trend(daily), "qualifies_for_fit": qualifies})
 
     if args.format == "json":
-        print(json.dumps({"sources": {"dev-decisions": n_dd, "sys1": n_sys1}, "groups": report}, indent=2))
+        print(json.dumps({"sources": {"dev-decisions": n_dd, "sys1": n_sys1},
+                          "groups": report, "jaggedness": jaggedness}, indent=2))
         return EXIT_OK
 
     arrow = {"up": "\u25b2", "down": "\u25bc", "flat": "\u00b7", None: ""}
     print(f"Calibration: {n_dd} rows from dev-decisions, {n_sys1} from the sys1 store")
+    if jaggedness:
+        print("jaggedness (unstable draw rate):")
+        for j in jaggedness:
+            print(f"  {j['task']} / {j['provider']}: {j['unstable_rate']} over {j['heads_drawn']} heads")
     print(f"{'task':<22} {'head':<24} {'provider':<12} {'n':>4} {'acc':>6} {'span':>5}  trend  fit?")
     for g in report:
         t = g.get("trend") or {}
@@ -3976,12 +4016,21 @@ _UX_STATE_ALIASES = {"real": "has-data"}
 
 
 def _parse_ux_contract(path: Path) -> dict:
-    """Parse a docs/ux route contract: ## States checkboxes + ## Controls bullets."""
-    states, controls = {}, {}
+    """Parse a docs/ux route contract: ## States checkboxes + ## Controls bullets
+    + ## Transitions bullets (action -> destination-route)."""
+    states, controls, transitions = {}, {}, []
     section = None
     for line in path.read_text().splitlines():
         if line.startswith("## "):
-            section = "states" if "States" in line else ("controls" if "Controls" in line else None)
+            section = ("states" if "States" in line else
+                       ("controls" if "Controls" in line else
+                        ("transitions" if "Transitions" in line else None)))
+            continue
+        if section == "transitions":
+            m = re.match(r"^\s*[-*]\s+(.+?)\s+->\s+(\S+)\s*$", line)
+            if m:
+                transitions.append({"action": m.group(1).strip(),
+                                    "to": m.group(2).strip().strip("`")})
             continue
         if section == "states":
             m = re.match(r"^\s*[-*]\s+\[[ xX]\]\s+([\w-]+):\s*(.+)$", line)
@@ -3991,7 +4040,8 @@ def _parse_ux_contract(path: Path) -> dict:
             m = re.match(r"^\s*[-*]\s+([^:]+):\s*(.+)$", line)
             if m:
                 controls[m.group(1).strip()] = m.group(2).strip()
-    return {"route": path.stem, "states": states, "controls": controls}
+    return {"route": path.stem, "states": states, "controls": controls,
+            "transitions": transitions}
 
 
 def _load_ux_flags(flags_dir: Path) -> dict:
@@ -4039,7 +4089,32 @@ def cmd_ux_surface(args: argparse.Namespace) -> int:
     if not contracts:
         print("error: no route contracts with ## States found", file=sys.stderr)
         return EXIT_ERROR
+    app_entry = args.entry or args.app
     flags = _load_ux_flags(Path(args.flags_dir).expanduser())
+
+    # flow graph (mechanical): every transition destination must be a
+    # contracted route; routes with no inbound transition are orphans; non-leaf
+    # routes with no outbound transitions are dead ends. Code decides what is
+    # decidable — these never touch a model.
+    route_names = {c["route"] for c in contracts}
+    undefined, orphans, dead_ends = [], [], []
+    outbounds: dict = {}
+    for c in contracts:
+        for t in c.get("transitions", []):
+            if t["to"] not in route_names and t["to"] not in ("external", "exit"):
+                undefined.append(f"{c['route']}: {t['action']} -> {t['to']} (no contract)")
+            outbounds.setdefault(c["route"], 0)
+            outbounds[c["route"]] += 1
+    inbounds: dict = {}
+    for c in contracts:
+        for t in c.get("transitions", []):
+            inbounds[t["to"]] = inbounds.get(t["to"], 0) + 1
+    for c in contracts:
+        if inbounds.get(c["route"], 0) == 0 and c["route"] != app_entry:
+            orphans.append(c["route"])
+        # dead end: reachable (has inbound) but nothing to leave by
+        if inbounds.get(c["route"], 0) > 0 and outbounds.get(c["route"], 0) == 0:
+            dead_ends.append(c["route"])
 
     routes = []
     n_states = n_verified = n_drift = 0
@@ -4071,15 +4146,19 @@ def cmd_ux_surface(args: argparse.Namespace) -> int:
                                "verification": verification, "flags": cell_flags,
                                "confirmed_drift": confirmed})
         routes.append({"route": c["route"], "n_controls": len(c["controls"]),
-                       "states": states_out})
+                       "states": states_out, "transitions": c.get("transitions", [])})
 
     artifact = {
         "schema": "ux-surface/v1",
         "app": args.app,
         "generated": datetime.now(timezone.utc).isoformat(),
         "routes": routes,
+        "flow": {"undefined_destinations": undefined, "orphan_routes": orphans,
+                 "dead_end_routes": dead_ends,
+                 "entry": app_entry},
         "summary": {"routes": len(routes), "states": n_states,
-                    "states_verified": n_verified, "confirmed_drift_flags": n_drift},
+                    "states_verified": n_verified, "confirmed_drift_flags": n_drift,
+                    "flow_problems": len(undefined) + len(orphans) + len(dead_ends)},
     }
     out_dir = SURFACES_DIR / "ux"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -4092,6 +4171,15 @@ def cmd_ux_surface(args: argparse.Namespace) -> int:
             mark = {"confirmed-drift": "[DRIFT]", "flags-ungraded": "[UNGRADED]",
                     "clean": "[clean]", "unverified": "[no capture]"}.get(st["verification"], "?")
             print(f"  {r['route']:<12} {st['state']:<10} {mark}")
+    flow = artifact["flow"]
+    if flow["undefined_destinations"]:
+        print("  flow: UNDEFINED destinations:")
+        for u in flow["undefined_destinations"]:
+            print(f"    {u}")
+    if flow["orphan_routes"]:
+        print(f"  flow: orphan routes (no inbound): {', '.join(flow['orphan_routes'])}")
+    if flow["dead_end_routes"]:
+        print(f"  flow: dead ends (no outbound): {', '.join(flow['dead_end_routes'])}")
     print(f"  artifact: {out_path}")
     print(f"  confirmed drift flags: {n_drift}")
 
@@ -4101,6 +4189,7 @@ def cmd_ux_surface(args: argparse.Namespace) -> int:
             json.dumps(artifact, sort_keys=True).encode()).hexdigest()[:16],
         "routes": len(routes), "states": n_states,
         "states_verified": n_verified, "confirmed_drift_flags": n_drift,
+        "flow_problems": len(undefined) + len(orphans) + len(dead_ends),
         "artifact": str(out_path), "verdict": "ok",
     })
     return EXIT_OK
@@ -4121,6 +4210,13 @@ def cmd_ux_gate(args: argparse.Namespace) -> int:
     artifact = json.loads(surface_path.read_text())
 
     drift, ungraded, unverified = [], [], []
+    flow = artifact.get("flow") or {}
+    for u in flow.get("undefined_destinations", []):
+        ungraded.append(f"    [FLOW] {u}")
+    if flow.get("orphan_routes"):
+        ungraded.append(f"    [FLOW] orphan routes: {', '.join(flow['orphan_routes'])}")
+    if flow.get("dead_end_routes"):
+        ungraded.append(f"    [FLOW] dead ends: {', '.join(flow['dead_end_routes'])}")
     for r in artifact.get("routes", []):
         for st in r.get("states", []):
             cell = f"{r['route']}/{st['state']}"
@@ -4147,6 +4243,7 @@ def cmd_ux_gate(args: argparse.Namespace) -> int:
         "op": "ux-gate", "app": args.app, "task": "ux_gate",
         "input_sha256": hashlib.sha256(surface_path.read_bytes()).hexdigest()[:16],
         "confirmed_drift": len(drift), "ungraded_flags": len(ungraded),
+        "drifts": len(drift),
         "unverified_states": len(unverified),
         "verdict": verdict,
     })
@@ -5434,6 +5531,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--flags-dir",
                     default=str(Path.home() / ".zcode/workspace/default/ux-capture-probe/shots"),
                     help="ux-capture kit flag reports dir")
+    sp.add_argument("--entry", default=None,
+                    help="Entry route name (exempt from orphan check; default: app name)")
     sp.set_defaults(func=cmd_ux_surface)
 
     sp = sub.add_parser("ux-gate",
