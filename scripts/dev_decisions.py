@@ -2478,6 +2478,10 @@ _EVIDENCE_GATE_MAX_CRITERIA = 12
 # their own bounds internally.
 _EVIDENCE_BLOCK_CHARS = 20_000
 _EVIDENCE_VERDICTS = ("supported", "insufficient", "contradicted")
+_DOCS_GATE_MAX_ARTIFACTS = 8
+_DOCS_GATE_MAX_SECTIONS = 16
+_DOCS_GATE_SECTION_CHARS = 2000
+_DOCS_GATE_MAX_STALE = 8
 _PLAN_GATE_SECTION_CHARS = 2000
 # Meta sections carry no proposed work; scope-creep heads would false-flag them.
 _PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes")
@@ -2841,6 +2845,217 @@ def cmd_evidence_gate(args: argparse.Namespace) -> int:
         "telemetry": result.telemetry.get(used_provider, {}),
     })
     print(f"  verdict: {'NOT SUPPORTED' if gaps else 'SUPPORTED'}")
+    return EXIT_WARN if gaps else EXIT_OK
+
+
+def _parse_linked_artifacts(text: str) -> list[tuple[str, str]]:
+    """Parse the '## Linked artifacts' section into (doc path, promise) pairs.
+
+    Only backticked file paths count; directories (trailing '/') and free-text
+    lines are skipped.
+    """
+    artifacts: list[tuple[str, str]] = []
+    in_section = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_section = "linked artifact" in line.lower()
+            continue
+        if not in_section:
+            continue
+        m = re.match(r"^\s*-\s+`([^`]+)`\s+[—–-]+\s+(.+)$", line)
+        if m and not m.group(1).rstrip().endswith("/"):
+            artifacts.append((m.group(1), m.group(2).strip()))
+    return artifacts
+
+
+def _removed_md_claims(diff_text: str) -> list[str]:
+    """Removed lines from markdown files in a diff = old doc claims (bounded)."""
+    claims: list[str] = []
+    cur_md = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            cur_md = line.rstrip().endswith(".md")
+            continue
+        if cur_md and line.startswith("-") and not line.startswith("---"):
+            claim = line[1:].strip().lstrip("-").strip()
+            if len(claim) > 40 and not claim.startswith(("#", "!", "[", "|")):
+                claims.append(claim[:200])
+    return claims[:_DOCS_GATE_MAX_STALE]
+
+
+def cmd_docs_gate(args: argparse.Namespace) -> int:
+    """
+    Documentation coverage gate: does the documentation fully cover what was
+    developed or fixed? Two directions — forward coverage (does each linked
+    artifact now contain its promised update) and change-induced staleness
+    (do the docs still assert claims the diff removed). Advisorial; the gate
+    reads docs and diffs, never verifies prose quality.
+    """
+    plan_path = Path(args.plan)
+    if not plan_path.exists():
+        print(f"error: plan not found: {plan_path}", file=sys.stderr)
+        return EXIT_ERROR
+    if sys1 is None:
+        print("error: docs-gate requires sys1", file=sys.stderr)
+        return EXIT_ERROR
+
+    text = plan_path.read_text()
+    repo_root = Path(getattr(args, "repo_root", None) or Path.cwd())
+    artifacts = _parse_linked_artifacts(text)[:_DOCS_GATE_MAX_ARTIFACTS]
+    if not artifacts:
+        print("error: no linked artifacts found — expected backticked doc paths with a promise under '## Linked artifacts'.", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+
+    diff_value = getattr(args, "diff", None)
+    diff_text = ""
+    if diff_value:
+        dp = Path(diff_value)
+        if dp.exists():
+            diff_text = dp.read_text()
+        else:
+            out = subprocess.run(["git", "-C", str(repo_root), "diff", diff_value], capture_output=True, text=True, timeout=60)
+            if out.returncode != 0:
+                print(f"error: git diff {diff_value} failed: {out.stderr.strip()[:150]}", file=sys.stderr)
+                return EXIT_ERROR
+            diff_text = out.stdout
+
+    # Dedupe docs by path — the same file can serve several artifacts.
+    doc_sections: dict[str, list[tuple[str, str]]] = {}
+    doc_missing: set[str] = set()
+    for rel, _promise in artifacts:
+        if rel in doc_sections or rel in doc_missing:
+            continue
+        p = repo_root / rel
+        if p.exists() and p.is_file():
+            doc_sections[rel] = _parse_plan_sections(p.read_text())[:_DOCS_GATE_MAX_SECTIONS]
+        else:
+            doc_missing.add(rel)
+    doc_rels = [rel for rel, _ in artifacts if rel in doc_sections]
+    doc_missing = sorted(doc_missing)
+
+    # Request 1 — coverage: each artifact promise vs its document's sections.
+    # Focused state: artifacts + doc sections, nothing else (context rot).
+    cov_heads: list = []
+    for i, (rel, promise) in enumerate(artifacts):
+        if rel in doc_missing:
+            continue
+        j = doc_rels.index(rel)
+        secs = doc_sections[rel]
+        cov_heads.append(sys1.make_noul(
+            f"Does the document {rel} now cover this promised update? Promise: {promise}",
+            id=f"a{i}_updated"))
+        options = {f"d{j}.{s}": h for s, (h, _b) in enumerate(secs)}
+        options["none"] = "No section in this document covers the promise."
+        cov_heads.append(sys1.make_choice(
+            f"Which section of {rel} covers the promised update?",
+            list(options.keys()), id=f"a{i}_where", descriptions=options))
+    parts = [f"Documentation coverage check: {len(artifacts)} promised updates (A0..A{len(artifacts) - 1}) against their documents' sections (d<j>.<s>)."]
+    for i, (rel, promise) in enumerate(artifacts):
+        parts.append(f"A{i} -> {rel}: {promise}")
+    for j, rel in enumerate(doc_rels):
+        for s, (h, b) in enumerate(doc_sections[rel]):
+            parts.append(f"=== d{j}.{s} [{h}] ({rel}) ===\n{b[:_DOCS_GATE_SECTION_CHARS]}")
+    cov_state = "\n\n".join(parts)[: cfg["providers"].get("drex_max_chars", 400_000)]
+
+    cov_task = sys1.types.Task(id="docs_gate", heads=cov_heads, description="Documentation coverage gate (speculative fan-out)")
+    chain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(cov_task, cov_state, cfg)[0] or _sys1_chain("jev")
+    result = sys1.classify(chain, cov_task, cov_state, cfg=cfg, log=False)
+    answers: dict = {}
+    used_provider = chain[0] if chain else ""
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        if result.answers.get(mapped):
+            answers = result.answers[mapped]
+            used_provider = mapped
+            break
+    if not answers:
+        print(f"error: no provider answered (chain: {', '.join(chain)})", file=sys.stderr)
+        return EXIT_ERROR
+
+    # Request 2 — staleness: removed claims vs the docs, in a state that
+    # carries no coverage framing (mixing the two drowned the noul: 0.01 on a
+    # verbatim match, vs 0.78-0.90 in a focused state — measured 2026-10-02).
+    stale_claims = _removed_md_claims(diff_text) if diff_text else []
+    stale_answers: dict = {}
+    stale_provider = ""
+    stale_latency = 0
+    if stale_claims:
+        sparts = [f"{len(stale_claims)} documentation claims were removed by a change. For each removed claim, judge whether any document below still asserts it."]
+        for j, rel in enumerate(doc_rels):
+            for s, (h, b) in enumerate(doc_sections[rel]):
+                sparts.append(f"=== d{j}.{s} [{h}] ({rel}) ===\n{b[:_DOCS_GATE_SECTION_CHARS]}")
+        for k, claim in enumerate(stale_claims):
+            sparts.append(f"REMOVED CLAIM x{k}: {claim}")
+        stale_state = "\n\n".join(sparts)[: cfg["providers"].get("drex_max_chars", 400_000)]
+        stale_heads = [sys1.make_noul(
+            f"The diff removed this documentation claim. Do any of the documents in the state still assert it? Removed claim: {claim}",
+            id=f"x{k}_stale") for k, claim in enumerate(stale_claims)]
+        stale_task = sys1.types.Task(id="docs_gate_stale", heads=stale_heads, description="Removed-claim staleness check")
+        schain = _sys1_chain(provider) if provider != "auto" else sys1.routing.route_decision(stale_task, stale_state, cfg)[0] or _sys1_chain("jev")
+        sresult = sys1.classify(schain, stale_task, stale_state, cfg=cfg, log=False)
+        for pid in schain:
+            mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+            if sresult.answers.get(mapped):
+                stale_answers = sresult.answers[mapped]
+                stale_provider = mapped
+                stale_latency = sresult.latency_ms
+                break
+    answers.update(stale_answers)
+
+    def _noul_p(head_id: str):
+        a = answers.get(head_id) or {}
+        p = a.get("noul")
+        return p if isinstance(p, (int, float)) else None
+
+    providers_used = "+".join(filter(None, dict.fromkeys([used_provider, stale_provider])))
+    print(f"Docs gate: {plan_path.name}  (provider={providers_used or 'none'}, coverage={result.latency_ms} ms"
+          + (f", staleness={stale_latency} ms" if stale_claims else "") + f", {len(doc_rels)} docs, {len(stale_claims)} staleness claims)")
+    uncovered: list[int] = []
+    for i, (rel, promise) in enumerate(artifacts):
+        if rel in doc_missing:
+            uncovered.append(i)
+            print(f"    [NO DOC]      A{i} {rel} — {promise[:90]}")
+            continue
+        p = _noul_p(f"a{i}_updated")
+        where = (answers.get(f"a{i}_where") or {}).get("label") or ""
+        if p is not None and p >= 0.5 and where != "none":
+            j = doc_rels.index(rel)
+            heading = doc_sections[rel][int(where.split(".")[-1])][0] if where.startswith(f"d{j}.") else where
+            print(f"    A{i} COVERED by [{heading}] ({rel})")
+        elif p is not None and p >= 0.5:
+            print(f"    A{i} COVERED (doc-level; no specific section) ({rel})")
+        else:
+            uncovered.append(i)
+            print(f"    [NOT COVERED] A{i} (p={p if p is not None else '----'}) {rel} — {promise[:90]}")
+    stale_hits = []
+    for k, claim in enumerate(stale_claims):
+        p = _noul_p(f"x{k}_stale")
+        p_s = f"{p:.2f}" if isinstance(p, (int, float)) else "----"
+        if p is not None and p >= 0.5:
+            stale_hits.append(k)
+            print(f"    [STALE]       x{k} (p={p_s}) still asserted: {claim[:100]}")
+        else:
+            print(f"    [ok]          x{k} (p={p_s}) removed claim not re-asserted: {claim[:80]}")
+    if not stale_claims:
+        print("    staleness: no diff supplied — skipped")
+
+    gaps = bool(uncovered or stale_hits)
+    log_record({
+        "op": "docs-gate",
+        "plan": str(plan_path),
+        "provider": providers_used,
+        "task": "docs_gate",
+        "artifacts": len(artifacts),
+        "uncovered": uncovered,
+        "stale_claims": stale_hits,
+        "verdict": "gaps" if gaps else "pass",
+        "latency_ms": result.latency_ms,
+        "telemetry": result.telemetry.get(used_provider, {}),
+    })
+    print(f"  verdict: {'GAPS' if gaps else 'PASS'}")
     return EXIT_WARN if gaps else EXIT_OK
 
 
@@ -3957,6 +4172,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_plan_gate)
+
+    # docs-gate
+    sp = sub.add_parser("docs-gate", help="Gate documentation coverage for a shipped plan (linked artifacts + staleness)")
+    sp.add_argument("plan", help="Plan markdown with a '## Linked artifacts' section")
+    sp.add_argument("--diff", default=None,
+                    help="Git diff range or diff file: enables change-induced staleness claims (removed doc lines)")
+    sp.add_argument("--repo-root", default=None, help="Repo root for resolving linked doc paths (default: cwd)")
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
+                    help="Override config provider")
+    sp.set_defaults(func=cmd_docs_gate)
 
     # evidence-gate
     sp = sub.add_parser("evidence-gate", help="Gate QA evidence per acceptance criterion (fail-closed close-out check)")
