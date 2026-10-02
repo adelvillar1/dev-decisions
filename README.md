@@ -1,6 +1,6 @@
 # dev-decisions
 
-Decision-model gates for git + ZCode workflows. Scans secrets/PII from commits, classifies diffs using multiple providers, and logs every decision to JSONL for calibration.
+Decision-model gates for git + ZCode workflows. Scans secrets/PII from commits, classifies diffs using multiple providers, gates plans/evidence/docs/architecture as contracts, and logs every decision and graded outcome to JSONL for calibration.
 
 **v0.3.0** — provider telemetry, live dashboard, feedback loop for calibration, ModernBERT eval provider.
 
@@ -22,7 +22,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 
 | Job | Model | Why |
 |---|---|---|
-| Diff classification (default) | **Decide — hosted Fastino API** (`decide`) | The active fastino provider; fast, declines on ambiguity |
+| Diff classification (default) | **auto → sys1 routing** | Roster chain `glide,drex,jev` from `~/.config/sys1/config.toml`; per-task overrides; falls back to `decide` without sys1 |
 | Diff classification (offline) | **GLiNER2.5-Decide** (`local`) | Same Decide model offline via sys1 — supported by design, **not encouraged** |
 | Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
 | Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
@@ -118,9 +118,34 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `pr_gate` | `pr-gate` command | Change type + risk + labels |
 | `issue_triage` | `triage-issues` command | Kind + priority |
 | `safety` | `zcode-gate` destructive patterns | Destructive + reversible |
+| `plan_gate` | `plan-gate` command | Criterion coverage + verifiability |
+| `evidence_gate` | `evidence-gate` command | Evidence sufficiency + consistency |
+| `docs_gate` | `docs-gate` command | Artifact coverage + staleness |
+| `arch_gate` | `arch-gate` command | Claim vs documented architecture |
 | `plan_surface_map` / `plan_deps` | `plan-surface` command | Criterion->module map / pairwise criterion order |
 
 ![v0.2.0 workflows](docs/workflows.svg)
+
+## Contract gates
+
+Six corpora, one pattern: the model judges, code counts, negative verdicts are
+advisorial until calibrated, and every negative requires a recorded human
+disposition (`dev-decisions disposition <gate> <target> --status
+fixed|waived|overridden --reason ...`). SKILL.md carries the full detail per
+gate; the short version:
+
+| Gate | Checks | Negative verdict |
+|---|---|---|
+| `plan-gate` | per-criterion coverage (noul) + verifiability + section scope creep; `--tests <root>` adds criteria-vs-test-suite matching; `--draws 3` (default) merges self-consistency draws and marks `/UNSTABLE` flags | `GAPS` (exit 1) |
+| `evidence-gate` | per-criterion evidence sufficiency + consistency from `== C<i> ==` tagged blocks; fail-closed (missing evidence is never a pass) | `NOT-SUPPORTED` |
+| `docs-gate` | linked-artifact coverage + change-induced staleness (removed doc lines vs the diff) | `GAPS` |
+| `arch-gate` | plan claims vs TECHNICAL-DOCUMENTATION.md; low documented = UNDOCUMENTED (conventions gap, never an accusation) | `DRIFTS` |
+
+Dispositions close the calibration loop by themselves: since 2026-10-02 the
+disposition command looks up the matched gate event (within 30 days) and
+writes per-head feedback rows — `fixed`/`waived` grade the prediction correct,
+`overridden` inverts it. Gate rows carry `input_sha256` and per-head answers
+so the pairing joins cleanly.
 
 ## Plan reconcile + calibration
 
@@ -210,6 +235,27 @@ dev-decisions classify-diff --allow-vendor     # one-off vendor call on a sensit
 # PR gating (local-first)
 dev-decisions pr-gate [branch] --dry-run
 dev-decisions pr-gate 123 --provider local
+dev-decisions pr-gate --diff-file patch.diff --fanout   # offline, per-file heads
+
+# Contract gates (advisorial; negatives need dispositions)
+dev-decisions plan-gate docs/plans/2026-10-02-feature.md
+dev-decisions plan-gate plan.md --tests tests/          # + criteria-vs-suite matching
+dev-decisions evidence-gate plan.md closeout-evidence.md
+dev-decisions docs-gate plan.md --diff main..HEAD
+dev-decisions arch-gate plan.md --repo-root .
+
+# Record the human decision on a negative verdict (writes calibration rows)
+dev-decisions disposition plan-gate plan.md --status waived --reason "..."
+
+# Precompute the decomposition surface for a plan, grade it after shipping
+dev-decisions plan-surface docs/plans/2026-10-02-feature.md --repo-root .
+dev-decisions plan-reconcile docs/plans/2026-10-02-feature.md --repo-root .
+
+# Per-head graded-row counts and floor-fit readiness (both feedback stores)
+dev-decisions calibration            # add --format json for machines
+
+# Self-tests (stdlib unittest; no pytest needed)
+python3 scripts/selftest.py
 
 # Issue triage (dry-run by default)
 dev-decisions triage-issues [owner/repo] --limit 20
@@ -253,11 +299,29 @@ dev-decisions remove-hooks /path/to/repo
 `zcode-gate` reads JSON from stdin (PreToolUse hook). It:
 
 1. Fast-exits on non-Bash commands.
-2. Detects destructive patterns (`git push --force`, `rm -rf`, `DROP TABLE`, etc.).
-3. Runs the `safety` task (local GLiNER) to check reversibility.
-4. With `advisory_only = true` (default): warns but proceeds (exit 1).
-5. With `advisory_only = false`: blocks (exit 2).
-6. On `git commit`/`git push`: runs `scan-staged` / `classify-diff` and returns their exit code.
+2. Strips inert spans (quoted text, heredoc bodies) from the command and
+   matches destructive patterns against the skeleton — a grep ARGUMENT or a
+   commit MESSAGE quoting dangerous words does not trip the gate. Quoted
+   spans after interpreter flags (`psql -c 'DROP TABLE ...'`, eval, exec)
+   stay in the skeleton: they execute. (2026-10-02: 8 graded false
+   positives, two at block severity, all fixed by this.)
+3. On a pattern hit, runs the `safety` task through sys1's router to refine
+   reversibility. Destructive AND irreversible — or high-stakes
+   (force-push/DROP TABLE/kubectl delete) with unknown reversibility —
+   hard-blocks (exit 2) regardless of `advisory_only` (the HITL policy:
+   negative verdicts with no favorable cost asymmetry).
+4. `--no-verify` is a hook bypass, not a destructive op: advisory
+   `hook_bypass` flag, never a block.
+5. Benign non-commit commands log a `verdict: clean` true-negative row
+   (the calibration counterweight to pattern hits).
+6. With `advisory_only = true` (default): lower-stakes destructive hits warn
+   but proceed (exit 1). With `advisory_only = false`: blocks (exit 2).
+7. On `git commit`/`git push`: runs `scan-staged` / `classify-diff` and
+   returns their exit code.
+
+Every verdict row carries `input_sha256` (of the full command), the safety
+`heads`, `patterns_hit`, and `hook_bypass` — so human grading can join
+against exactly what the gate saw.
 
 ```json
 {
@@ -391,6 +455,15 @@ Repo-local `.dev-decisions.toml` supports one extra flag: `[repo] sensitive = tr
 
 New fields in v0.2.0: `task`, `labels`, `destructive`, `reversible`, `advisory_only`.
 
+New fields (2026-10-02): gate rows carry `input_sha256` + per-head `heads`
+(zcode-gate also `patterns_hit`, `hook_bypass`, `task: safety`; plan-gate
+`draws`/`unstable`; arch-gate `claim_texts`); classify-diff rows carry
+`overridden` (mechanical pushdowns); zcode-gate gains `verdict: clean`
+true-negative rows for benign non-commit commands. Dispositions pair with
+their gate event to write graded rows into
+`logs/feedback/feedback.jsonl` (schema: `input_sha256`, `task`, `provider`,
+`label`, `head_id`, `note`).
+
 New fields in v0.3.0: `telemetry` (per-provider dict with latency, error_kind, token usage, structured_ok, top2_gap, embedding_norm, null_label_count, noul_count). Feedback records go to `logs/feedback/feedback.jsonl` and are joined on `input_sha256` + `task` for calibration curves.
 
 ## Calibration loop
@@ -400,6 +473,14 @@ After a few weeks, the JSONL log contains (input, model, confidence, human-outco
 1. Export log: `dev-decisions log --format json > calibration.jsonl`
 2. For each provider × head, plot confidence vs human-accepted rate.
 3. Set per-provider per-head floor from the curve (thresholds don't transfer — fit locally).
+
+## Tests
+
+`python3 scripts/selftest.py` — stdlib unittest, no pytest. Covers the
+zcode-gate skeleton (all 8 graded false positives from 2026-10-02 must stay
+clean; real destructive commands must still hit), plan-gate draw merging,
+path-based task routing, the docs-only pushdown, and disposition feedback
+pairing.
 
 ## Requirements
 
