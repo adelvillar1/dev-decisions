@@ -156,6 +156,16 @@ dev-decisions plan-gate plan.md --tests tests/    # + criteria-vs-test-suite cov
 
 **Coverage ≠ correctness:** a flag is a review trigger, not a veto — borderline probabilities (roughly 0.3–0.6) mean escalate to human, and the gate is advisorial by design until floors are fitted from JSONL outcomes (`op: "plan-gate"` rows, hand-graded; ~20 plans to calibration).
 
+## Plan surface (feed-forward decomposition input)
+
+`plan-surface` is `plan-gate`'s feed-forward counterpart: instead of checking a drafted plan, it precomputes the judgment graph the decomposer should assemble against. Layers, each one request (or chunked requests): criterion → module mapping (a choice head over a numbered repo inventory plus an existence noul, per criterion), pairwise criterion ordering (one choice head per unordered pair: `cI_first` / `cJ_first` / `independent`), then plain-code assembly — thresholded DAG, topological order, in-band edges reported as UNCERTAIN (never silently dropped), weakest-edge cycle breaks, path-pattern risk flags (migrations, auth, config, …). The artifact lands in `~/.local/share/dev-decisions/surfaces/<plan-stem>.surface.json`.
+
+```bash
+dev-decisions plan-surface docs/plans/2026-10-02-feature.md --repo-root .
+```
+
+Advisorial, never a gate: the decomposer may overrule any edge or mapping; record overrules with `dev-decisions disposition plan-surface <plan> --status overridden --reason ...` so they double as calibration rows. The predicted order is printed as SOFT (one linearization of the edges — a near-chain over 9+ criteria is the over-serialization signature, and the edge list with confidences is the actual signal). Layers route via by_task overrides `plan_surface_map` / `plan_deps` (both `jev`: the 2026-10-02 probe showed jev returns the full distributions the map choice needs, where drex/glide return one weak top-1 pick, and the deps fan-out is jev-native). Thresholds live in sys1 `plansurface` (`MAP_FLOOR` 0.3 recall-oriented, `DEP_THRESHOLD` 0.8 where probe direction-precision hit 1.0); `--map-floor/--map-top/--dep-threshold/--band` override.
+
 ## Evidence gating
 
 `evidence-gate` is the QA close-out check: does the collected evidence support a pass per acceptance criterion? A green exit code is weak evidence; this gate grades the bundle. Criteria come from the plan's checkboxes (order defines C<i>); evidence is a plain file with blocks tagged `== C0 ==`, `== C1 ==`, … containing commands, log tails, and full logs welcome — blocks bound at ~20k chars, total state bound at Drex capacity (~400k chars), so no tail-pasting.

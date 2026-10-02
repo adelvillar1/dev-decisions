@@ -118,8 +118,17 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `pr_gate` | `pr-gate` command | Change type + risk + labels |
 | `issue_triage` | `triage-issues` command | Kind + priority |
 | `safety` | `zcode-gate` destructive patterns | Destructive + reversible |
+| `plan_surface_map` / `plan_deps` | `plan-surface` command | Criterion->module map / pairwise criterion order |
 
 ![v0.2.0 workflows](docs/workflows.svg)
+
+## Plan surface
+
+`plan-surface` is the feed-forward counterpart of `plan-gate`: it precomputes the judgment graph a plan decomposer should assemble against — criterion-to-module mapping, pairwise criterion dependencies with confidences, thresholded DAG with topological order, uncertain band, risk flags — and writes the artifact to `~/.local/share/dev-decisions/surfaces/`. See SKILL.md ("Plan surface") for the layer detail and calibration notes.
+
+```bash
+dev-decisions plan-surface docs/plans/2026-10-02-feature.md --repo-root .
+```
 
 ## Telemetry and dashboard
 

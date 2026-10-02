@@ -80,6 +80,10 @@ def _bootstrap_sys1():
 
 
 sys1 = _bootstrap_sys1()
+try:
+    import sys1.plansurface as _plansurface  # type: ignore[import-not-found]  # noqa: E402
+except Exception:  # sys1 too old for the plansurface module
+    _plansurface = None
 
 # --provider choices: dynamic from the sys1 registry, so candidate models
 # (clm, kev, tev1, decide_1b, ...) show up as soon as sys1 registers them —
@@ -452,6 +456,7 @@ VERSION = "0.3.0"
 CONFIG_DIR = Path.home() / ".config" / "dev-decisions"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 LOG_DIR = Path.home() / ".local" / "share" / "dev-decisions" / "logs"
+SURFACES_DIR = Path.home() / ".local" / "share" / "dev-decisions" / "surfaces"
 SKILL_DIR = Path.home() / ".agents" / "skills" / "dev-decisions"
 HOOKS_DIR = SKILL_DIR / "hooks"
 DEFAULT_MAX_DIFF_CHARS = 12_000
@@ -2737,6 +2742,117 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     return EXIT_WARN if gaps else EXIT_OK
 
 
+
+def cmd_plan_surface(args: argparse.Namespace) -> int:
+    """
+    Feed-forward plan surface (layered sys1 precompute for task decomposition):
+      - map layer: criterion -> repository surface modules (choice over a
+        numbered inventory + existence noul per criterion, one request)
+      - deps layer: pairwise criterion ordering (one choice head per unordered
+        pair, chunked across requests)
+      - assembly, no model: thresholded DAG, topological order, uncertain band
+        reported (never silently dropped), weakest-edge cycle breaks, path-
+        pattern risk flags.
+    Advisorial input to the decomposer, not a gate: it may overrule any edge
+    or mapping; record overrules with `disposition plan-surface <plan>
+    --status overridden --reason ...` so they double as calibration rows.
+    """
+    if _plansurface is None:
+        print("error: plan-surface requires sys1 with the plansurface module (upgrade sys1)", file=sys.stderr)
+        return EXIT_ERROR
+    plan_path = Path(args.plan).expanduser()
+    if not plan_path.exists():
+        print(f"error: plan not found: {plan_path}", file=sys.stderr)
+        return EXIT_ERROR
+    repo_root = Path(args.repo_root).expanduser() if args.repo_root else Path.cwd()
+    if not repo_root.exists():
+        print(f"error: repo root not found: {repo_root}", file=sys.stderr)
+        return EXIT_ERROR
+
+    plan_text = plan_path.read_text()
+    criteria = _parse_plan_criteria(plan_text)[:_plansurface.MAX_CRITERIA]
+    if not criteria:
+        print("error: no acceptance criteria found (checkbox lines).", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    map_floor = args.map_floor if args.map_floor is not None else _plansurface.MAP_FLOOR
+    map_top = args.map_top if args.map_top is not None else _plansurface.MAP_TOP
+    dep_threshold = args.dep_threshold if args.dep_threshold is not None else _plansurface.DEP_THRESHOLD
+    band = args.band if args.band is not None else _plansurface.DEP_BAND
+
+    modules = _plansurface.inventory_surface(repo_root)
+    print(f"Plan surface: {plan_path.name}  ({len(criteria)} criteria, {len(modules)} inventory entries)")
+    map_res = _plansurface.run_map(criteria, modules, provider=args.map_provider, cfg=cfg)
+    if not map_res["answers"]:
+        print(f"error: map layer returned no answers (chain: {', '.join(map_res['chain'])})", file=sys.stderr)
+        return EXIT_ERROR
+    dep_res = _plansurface.run_deps(criteria, provider=args.deps_provider, cfg=cfg)
+    if not dep_res["answers"]:
+        print(f"error: deps layer returned no answers (chain: {', '.join(dep_res['chain'])})", file=sys.stderr)
+        return EXIT_ERROR
+
+    artifact = _plansurface.assemble(map_res, dep_res, criteria, modules,
+                                     map_floor=map_floor, map_top=map_top,
+                                     dep_threshold=dep_threshold, band=band)
+    artifact["meta"]["plan"] = str(plan_path)
+    artifact["meta"]["repo_root"] = str(repo_root)
+    artifact["meta"]["criteria_texts"] = criteria
+
+    SURFACES_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = SURFACES_DIR / f"{plan_path.stem}.surface.json"
+    out_path.write_text(json.dumps(artifact, indent=2))
+
+    pmap, pdeps = artifact["meta"]["provider_map"], artifact["meta"]["provider_deps"]
+    order = artifact["order"]
+    print(f"  map: {sum(1 for c in artifact['criteria'] if c['modules'])}/{len(criteria)} criteria mapped"
+          f" (provider={pmap})")
+    for node in artifact["criteria"]:
+        mods = ", ".join(f"{m['path']} ({m['p']})" for m in node["modules"]) or "unmapped"
+        risks = f"  [risk: {', '.join(node['risks'])}]" if node["risks"] else ""
+        print(f"    {node['id']}: {mods}{risks}")
+    print(f"  dependencies: {len(artifact['edges'])} edges above {dep_threshold}, "
+          f"{len(artifact['uncertain'])} uncertain (provider={pdeps})")
+    for e in artifact["edges"]:
+        print(f"    {e['before']} -> {e['after']}  p={e['p']}")
+    for u in artifact["uncertain"]:
+        print(f"    [UNCERTAIN] {'/'.join(u['pair'])}  reading={u['reading']}")
+    for cb in artifact["cycle_breaks"]:
+        d = cb["dropped"]
+        print(f"    [CYCLE] dropped {d['before']} -> {d['after']} (p={d['p']}) to break a cycle")
+    # A near-chain predicted order is the over-serialization signature: present
+    # the ordering as SOFT (edge list above is the truth, this is one linearization).
+    print(f"  suggested order (soft, one linearization of the edges): {' -> '.join(order) if order else '(none)'}")
+    print(f"  artifact: {out_path}")
+    print("  overrule anything with: dev-decisions disposition plan-surface "
+          f"{plan_path} --status overridden --reason ...")
+
+    log_record({
+        "op": "plan-surface",
+        "plan": str(plan_path),
+        "repo": str(repo_root),
+        "provider": f"map={pmap},deps={pdeps}",
+        "task": "plan_surface_map+plan_deps",
+        "criteria": len(criteria),
+        "modules": len(modules),
+        "edges": len(artifact["edges"]),
+        "uncertain": len(artifact["uncertain"]),
+        "cycle_breaks": len(artifact["cycle_breaks"]),
+        "order": order,
+        "artifact": str(out_path),
+        "input_sha256": map_res["sha256"],
+        "heads": {
+            pmap: {k: {"confidence": v.get("confidence")}
+                   for k, v in map_res["answers"].items() if isinstance(v, dict)},
+            pdeps: {k: {"confidence": v.get("confidence")}
+                    for k, v in dep_res["answers"].items() if isinstance(v, dict)},
+        },
+        "telemetry": {"map": map_res["telemetry"], "deps": dep_res["telemetry"]},
+        "verdict": "ok",
+    })
+    return EXIT_OK
+
+
 def _parse_evidence_blocks(text: str) -> dict[str, str]:
     """Parse '== C<i> ==' tagged evidence blocks into {id: text} (bounded per block)."""
     blocks: dict[str, list[str]] = {}
@@ -4384,6 +4500,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_plan_gate)
+
+    # plan-surface
+    sp = sub.add_parser("plan-surface",
+                        help="Precompute the criterion/surface/dependency judgment graph for a plan (feed-forward decomposition input)")
+    sp.add_argument("plan", help="Plan markdown file with checkbox acceptance criteria")
+    sp.add_argument("--repo-root", default=None, help="Repository the plan targets (default: cwd)")
+    sp.add_argument("--map-provider", default="auto",
+                    help="Map layer provider chain (default: auto -> sys1 routing / plan_surface_map override)")
+    sp.add_argument("--deps-provider", default="auto",
+                    help="Dependency layer provider chain (default: auto -> plan_deps override)")
+    sp.add_argument("--map-floor", type=float, default=None,
+                    help="Module-confidence floor (default: sys1 plansurface MAP_FLOOR)")
+    sp.add_argument("--map-top", type=int, default=None,
+                    help="Max modules per criterion (default: sys1 plansurface MAP_TOP)")
+    sp.add_argument("--dep-threshold", type=float, default=None,
+                    help="Edge confidence cut (default: sys1 plansurface DEP_THRESHOLD)")
+    sp.add_argument("--band", type=float, default=None,
+                    help="Uncertainty band below the threshold (default: sys1 plansurface DEP_BAND)")
+    sp.set_defaults(func=cmd_plan_surface)
 
     # docs-gate
     sp = sub.add_parser("docs-gate", help="Gate documentation coverage for a shipped plan (linked artifacts + staleness)")
