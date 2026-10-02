@@ -17,6 +17,8 @@ Covers the pieces the grading session proved load-bearing:
     overridden inverts yes/no heads and nulls choice heads.
   - _daily_series/_trend: calibration drift bucketing and the early-vs-late
     direction guard (gathering until both halves have >= 3 rows).
+  - _parse_ux_contract/_load_ux_flags: route-contract parsing and capture
+    cell normalization (real -> has-data) for the ux corpus.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -199,6 +202,38 @@ class TestTrend(unittest.TestCase):
         daily = [{"date": "2026-10-01", "n": 3, "accuracy": 0.8},
                  {"date": "2026-10-02", "n": 3, "accuracy": 0.82}]
         self.assertEqual(dd._trend(daily)["direction"], "flat")
+
+
+class TestUxCorpus(unittest.TestCase):
+    def test_parse_ux_contract(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "gates.md"
+            f.write_text("# UX contract\n\n## States\n"
+                         "- [ ] has-data: open inbox items present\n"
+                         "- [ ] sparse: empty states render\n\n"
+                         "## Controls (has-data)\n"
+                         "- header nav: chats, knowledge\n"
+                         "- stat cards row: open, blocks\n")
+            c = dd._parse_ux_contract(f)
+            self.assertEqual(c["route"], "gates")
+            self.assertEqual(c["states"]["sparse"], "empty states render")
+            self.assertIn("stat cards row", c["controls"])
+
+    def test_flags_normalization_and_drift(self):
+        with tempfile.TemporaryDirectory() as td:
+            flags_dir = Path(td)
+            (flags_dir / "gates.ux-flag.json").write_text(json.dumps({
+                "cell": "gates/real", "flags": [
+                    {"control": "trust stats", "type": "implementation-gap",
+                     "flag_correct": True, "graded": {"who": "spec", "cause": "drift"}},
+                    {"control": "nav", "type": "perception",
+                     "flag_correct": False, "graded": {"who": "dom"}},
+                ], "controls_pass": ["nav"], "draw_mismatch": False}))
+            flags = dd._load_ux_flags(flags_dir)
+            rep = flags[("gates", "has-data")]  # 'real' normalized
+            self.assertEqual(len(rep["confirmed_drift"]), 1)
+            self.assertEqual(rep["confirmed_drift"][0]["control"], "trust stats")
 
 
 class TestFeedbackRowShape(unittest.TestCase):

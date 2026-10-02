@@ -147,6 +147,21 @@ writes per-head feedback rows — `fixed`/`waived` grade the prediction correct,
 `overridden` inverts it. Gate rows carry `input_sha256` and per-head answers
 so the pairing joins cleanly.
 
+## UX corpus (ux-surface + ux-gate)
+
+The plan-surface pattern applied to UI: route contracts in `docs/ux/*.md`
+(states matrix + control inventory, authored from the design) are judged
+against rendered captures from the ux-capture kit (playwright pixels + DOM +
+a VLM capture layer, triangled against the DOM as a code-side witness).
+`ux-surface` builds the routes x designed-states x verification artifact;
+`ux-gate` gates it — human-graded confirmed drift fails, ungraded flags
+warn, semantic state-match stays WARN-only until calibrated.
+
+```bash
+dev-decisions ux-surface my-app --ux-docs docs/ux
+dev-decisions ux-gate my-app
+```
+
 ## Plan reconcile + calibration
 
 `plan-reconcile <plan.md>` grades a plan's surface artifact against its actual commits (tau, edge precision, feedback rows). `calibration` reports per-head graded-row counts, accuracy curves, and floor-fit readiness across both feedback stores. See SKILL.md for detail.

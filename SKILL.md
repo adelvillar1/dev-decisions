@@ -162,6 +162,15 @@ dev-decisions plan-gate plan.md --tests tests/    # + criteria-vs-test-suite cov
 
 **Mechanical pushdown:** a diff whose changed paths are ALL doc files gets its drift noul forced to no in code (not the model), and task routing reads changed paths instead of diff body text (a code diff mentioning `.md` no longer routes to docs_drift).
 
+## UX corpus (ux-surface + ux-gate)
+
+The UX design corpus: `docs/ux/<route>.md` contracts (states matrix + control inventory) are verified against rendered captures from the ux-capture kit (workspace/ux-capture-probe: playwright pixels + DOM dump + a VLM capture layer whose output triangled against the DOM — VLM-vs-DOM disagreement is a perception flag, DOM-vs-spec an implementation gap). `ux-surface <app>` builds the routes x states x verification artifact (confirmed-drift / flags-ungraded / clean / unverified); `ux-gate <app>` gates it: human-graded confirmed drift fails, ungraded flags and unverified states warn, semantic state-match stays WARN-only until its floor is fitted (Phase 0: 2/5). State names may contain hyphens (`has-data`); capture cell states normalize (`real` -> `has-data`).
+
+```bash
+dev-decisions ux-surface my-app --ux-docs docs/ux
+dev-decisions ux-gate my-app
+```
+
 ## Plan surface (feed-forward decomposition input)
 
 `plan-surface` is `plan-gate`'s feed-forward counterpart: instead of checking a drafted plan, it precomputes the judgment graph the decomposer should assemble against. Layers, each one request (or chunked requests): criterion → module mapping (a choice head over a numbered repo inventory plus an existence noul, per criterion), pairwise criterion ordering (one choice head per unordered pair: `cI_first` / `cJ_first` / `independent`), then plain-code assembly — thresholded DAG, topological order, in-band edges reported as UNCERTAIN (never silently dropped), weakest-edge cycle breaks, path-pattern risk flags (migrations, auth, config, …). The artifact lands in `~/.local/share/dev-decisions/surfaces/<plan-stem>.surface.json`.

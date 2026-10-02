@@ -3970,6 +3970,191 @@ def cmd_calibration(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ── ux corpus: route contracts, capture verification, gate ───────────────────
+
+_UX_STATE_ALIASES = {"real": "has-data"}
+
+
+def _parse_ux_contract(path: Path) -> dict:
+    """Parse a docs/ux route contract: ## States checkboxes + ## Controls bullets."""
+    states, controls = {}, {}
+    section = None
+    for line in path.read_text().splitlines():
+        if line.startswith("## "):
+            section = "states" if "States" in line else ("controls" if "Controls" in line else None)
+            continue
+        if section == "states":
+            m = re.match(r"^\s*[-*]\s+\[[ xX]\]\s+([\w-]+):\s*(.+)$", line)
+            if m:
+                states[m.group(1)] = m.group(2).strip()
+        elif section == "controls":
+            m = re.match(r"^\s*[-*]\s+([^:]+):\s*(.+)$", line)
+            if m:
+                controls[m.group(1).strip()] = m.group(2).strip()
+    return {"route": path.stem, "states": states, "controls": controls}
+
+
+def _load_ux_flags(flags_dir: Path) -> dict:
+    """{(route, state): flag-report} from the ux-capture kit's *.ux-flag.json.
+    Cell state tokens normalize through _UX_STATE_ALIASES (real -> has-data)."""
+    out: dict = {}
+    if not flags_dir.exists():
+        return out
+    for f in sorted(flags_dir.glob("*.ux-flag.json")):
+        try:
+            r = json.loads(f.read_text())
+        except Exception:
+            continue
+        cell = r.get("cell") or ""
+        if "/" not in cell:
+            continue
+        route, state = cell.split("/", 1)
+        state = _UX_STATE_ALIASES.get(state, state)
+        graded = [fl for fl in r.get("flags", []) if fl.get("flag_correct") is not None]
+        out[(route, state)] = {
+            "flags": r.get("flags", []),
+            "confirmed_drift": [fl for fl in graded
+                                if fl["type"] == "implementation-gap" and fl["flag_correct"]],
+            "controls_pass": r.get("controls_pass", []),
+            "draw_mismatch": r.get("draw_mismatch", False),
+            "semantic": r.get("semantic"),
+        }
+    return out
+
+
+def cmd_ux_surface(args: argparse.Namespace) -> int:
+    """
+    Build the UX surface artifact for an app (feed-forward decomposition input
+    for design, the plan-surface pattern applied to UI): routes x designed
+    states x verification status, merged from docs/ux route contracts and the
+    ux-capture kit's graded flag reports. Mechanical: enumeration and merge,
+    no model calls — judgment entered through the capture grading.
+    """
+    ux_docs = Path(args.ux_docs).expanduser()
+    if not ux_docs.exists():
+        print(f"error: ux docs dir not found: {ux_docs}", file=sys.stderr)
+        return EXIT_ERROR
+    contracts = [_parse_ux_contract(f) for f in sorted(ux_docs.glob("*.md"))]
+    contracts = [c for c in contracts if c["states"]]
+    if not contracts:
+        print("error: no route contracts with ## States found", file=sys.stderr)
+        return EXIT_ERROR
+    flags = _load_ux_flags(Path(args.flags_dir).expanduser())
+
+    routes = []
+    n_states = n_verified = n_drift = 0
+    for c in contracts:
+        states_out = []
+        for name, desc in c["states"].items():
+            rep = flags.get((c["route"], name))
+            if rep is None:
+                verification, cell_flags = "unverified", []
+            else:
+                cell_flags = [
+                    {"control": fl["control"], "type": fl["type"],
+                     "graded": (fl.get("graded") or {}).get("who"),
+                     "cause": (fl.get("graded") or {}).get("cause")}
+                    for fl in rep["flags"]]
+                if rep["confirmed_drift"]:
+                    verification = "confirmed-drift"
+                    n_drift += len(rep["confirmed_drift"])
+                elif cell_flags:
+                    verification = "flags-ungraded"
+                else:
+                    verification = "clean"
+                n_verified += 1
+            n_states += 1
+            confirmed = [
+                {"control": fl["control"], "cause": (fl.get("graded") or {}).get("cause")}
+                for fl in (rep or {}).get("confirmed_drift", [])]
+            states_out.append({"state": name, "designed": desc,
+                               "verification": verification, "flags": cell_flags,
+                               "confirmed_drift": confirmed})
+        routes.append({"route": c["route"], "n_controls": len(c["controls"]),
+                       "states": states_out})
+
+    artifact = {
+        "schema": "ux-surface/v1",
+        "app": args.app,
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "routes": routes,
+        "summary": {"routes": len(routes), "states": n_states,
+                    "states_verified": n_verified, "confirmed_drift_flags": n_drift},
+    }
+    out_dir = SURFACES_DIR / "ux"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{args.app}.surface.json"
+    out_path.write_text(json.dumps(artifact, indent=2))
+
+    print(f"UX surface: {args.app}  ({len(routes)} routes, {n_states} designed states)")
+    for r in routes:
+        for st in r["states"]:
+            mark = {"confirmed-drift": "[DRIFT]", "flags-ungraded": "[UNGRADED]",
+                    "clean": "[clean]", "unverified": "[no capture]"}.get(st["verification"], "?")
+            print(f"  {r['route']:<12} {st['state']:<10} {mark}")
+    print(f"  artifact: {out_path}")
+    print(f"  confirmed drift flags: {n_drift}")
+
+    log_record({
+        "op": "ux-surface", "app": args.app,
+        "task": "ux_surface", "input_sha256": hashlib.sha256(
+            json.dumps(artifact, sort_keys=True).encode()).hexdigest()[:16],
+        "routes": len(routes), "states": n_states,
+        "states_verified": n_verified, "confirmed_drift_flags": n_drift,
+        "artifact": str(out_path), "verdict": "ok",
+    })
+    return EXIT_OK
+
+
+def cmd_ux_gate(args: argparse.Namespace) -> int:
+    """
+    Gate an app's UX surface (feed-back): confirmed drift (human-graded real)
+    fails; ungraded flags and unverified states warn; semantic state-match
+    stays WARN-only until its floor is fitted. Counting is code.
+    """
+    surface_path = SURFACES_DIR / "ux" / f"{args.app}.surface.json"
+    if args.surface:
+        surface_path = Path(args.surface).expanduser()
+    if not surface_path.exists():
+        print(f"error: no ux surface at {surface_path} — run `dev-decisions ux-surface` first", file=sys.stderr)
+        return EXIT_ERROR
+    artifact = json.loads(surface_path.read_text())
+
+    drift, ungraded, unverified = [], [], []
+    for r in artifact.get("routes", []):
+        for st in r.get("states", []):
+            cell = f"{r['route']}/{st['state']}"
+            if st["verification"] == "confirmed-drift":
+                for fl in st.get("confirmed_drift", []):
+                    drift.append(f"    [DRIFT]  {cell}: {fl['control']} "
+                                 f"({(fl.get('cause') or '')[:70]})")
+            elif st["verification"] == "flags-ungraded":
+                ungraded.append(f"    [UNGRADED] {cell}: "
+                                + ", ".join(fl["control"] for fl in st["flags"]))
+            elif st["verification"] == "unverified":
+                unverified.append(f"    [NO CAPTURE] {cell}")
+
+    print(f"UX gate: {args.app}  ({len(artifact.get('routes', []))} routes)")
+    for line in drift:
+        print(line)
+    for line in ungraded:
+        print(line)
+    for line in unverified:
+        print(line)
+    gaps = bool(drift)
+    verdict = "drift" if drift else ("flags" if (ungraded or unverified) else "pass")
+    log_record({
+        "op": "ux-gate", "app": args.app, "task": "ux_gate",
+        "input_sha256": hashlib.sha256(surface_path.read_bytes()).hexdigest()[:16],
+        "confirmed_drift": len(drift), "ungraded_flags": len(ungraded),
+        "unverified_states": len(unverified),
+        "verdict": verdict,
+    })
+    print(f"  verdict: {verdict.upper()}")
+    print("  disposition with: dev-decisions disposition ux-gate <app> --status fixed|waived --reason ...")
+    return EXIT_WARN if (drift or ungraded or unverified) else EXIT_OK
+
+
 def cmd_triage_issues(args: argparse.Namespace) -> int:
     """Batch-classify issues and apply labels."""
     repo = getattr(args, "repo", None)
@@ -5240,6 +5425,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--attribute-provider", default="jev",
                     help="Commit-to-criterion attribution layer ('' disables)")
     sp.set_defaults(func=cmd_plan_reconcile)
+
+    # ux-surface / ux-gate
+    sp = sub.add_parser("ux-surface",
+                        help="Build the UX surface artifact: routes x designed states x capture verification")
+    sp.add_argument("app", help="App name (artifact key)")
+    sp.add_argument("--ux-docs", default="docs/ux", help="Route contracts dir (default docs/ux)")
+    sp.add_argument("--flags-dir",
+                    default=str(Path.home() / ".zcode/workspace/default/ux-capture-probe/shots"),
+                    help="ux-capture kit flag reports dir")
+    sp.set_defaults(func=cmd_ux_surface)
+
+    sp = sub.add_parser("ux-gate",
+                        help="Gate an app's UX surface: confirmed drift fails, ungraded flags warn")
+    sp.add_argument("app", help="App name (surface artifact key)")
+    sp.add_argument("--surface", default=None, help="Surface artifact path override")
+    sp.set_defaults(func=cmd_ux_gate)
 
     # calibration
     sp = sub.add_parser("calibration",
