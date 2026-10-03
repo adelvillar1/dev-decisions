@@ -22,10 +22,14 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 
 | Job | Model | Why |
 |---|---|---|
-| Diff classification (default) | **auto → sys1 routing** | Roster chain `glide,drex,jev` from `~/.config/sys1/config.toml`; per-task overrides; falls back to `decide` without sys1 |
-| Diff classification (offline) | **GLiNER2.5-Decide** (`local`) | Same Decide model offline via sys1 — supported by design, **not encouraged** |
-| Calibrated judgments, multi-question | **Jev** (`jev-1.13.0`) | Choice/Score/Noul, published training method |
-| Eval-only raw inference for calibration | **ModernBERT** (`answerdotai/ModernBERT-base`) | Sentence encoder, no fine-tuning, logs raw predictions |
+| Diff classification (default) | **auto → sys1 routing** | Roster chain `glide, drex, jev` from `~/.config/sys1/config.toml`; per-task overrides; falls back to `decide` without sys1 |
+| Routed default head | **GLiDE** (`glide`, fastino) | Cheap Jev-class default; long inputs size-gate to drex |
+| Long-context judgments | **Drex** (`drex-v1.5`, nace) | 131k-token states |
+| Contract gates + fan-out | **Jev** (`jev-1.13.0`, typesafe) | Choice/Score/Noul, fan-out native |
+| Classification | **GLiNER2.5-Decide** (fastino hosted) | Structured labels: diff type · risk · suggested labels |
+| Extraction | **GLiNER2.5** (fastino hosted) | Span extraction — PII redaction for `scan-staged --deep`; a different model from Decide, different use |
+| Bulk triage | **Julia** (`julia-1`, supersoniclabs) | Cheapest hosted; calibrated out of the default chain (1/6 agreement) — bulk or by-task only |
+| Eval only (not in active roster) | **ModernBERT** | Calibration comparison, kept available |
 
 ### Candidate models (opt-in, via sys1 flags)
 
