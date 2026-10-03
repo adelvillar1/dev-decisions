@@ -27,15 +27,16 @@
   <circle cx="460" cy="128" r="5" fill="#7c3aed"/>
   <text x="474" y="133" font-size="16" font-weight="700" fill="#0f172a">ZCode PreToolUse hook</text>
   <text x="460" y="162" font-size="13" fill="#334155">zcode-gate on every Bash command</text>
-  <text x="460" y="182" font-size="13" fill="#334155">destructive regex → safety task</text>
+  <text x="460" y="182" font-size="13" fill="#334155">inert-stripped patterns + safety task · HITL block</text>
   <text x="460" y="200" font-size="10.5" fill="#94a3b8" letter-spacing="1">AUTOMATIC · GLOBAL · OPT-IN</text>
 
   <!-- cli card -->
   <rect x="840" y="100" width="360" height="110" rx="12" fill="#ffffff" stroke="#e2e8f0"/>
   <circle cx="860" cy="128" r="5" fill="#0d9488"/>
   <text x="874" y="133" font-size="16" font-weight="700" fill="#0f172a">CLI + ZCode skill</text>
-  <text x="860" y="162" font-size="13" fill="#334155">pr-gate · triage-issues · changelog</text>
-  <text x="860" y="182" font-size="13" fill="#334155">fleet-scan · status · log · doctor</text>
+  <text x="860" y="160" font-size="12" fill="#334155">plan-gate · evidence-gate · docs-gate</text>
+  <text x="860" y="177" font-size="12" fill="#334155">arch-gate · ux-surface · uc-gate · plan-reconcile</text>
+  <text x="860" y="194" font-size="12" fill="#334155">calibration · disposition · pr-gate · triage-issues</text>
   <text x="860" y="200" font-size="10.5" fill="#94a3b8" letter-spacing="1">ON DEMAND</text>
 
   <line x1="220" y1="210" x2="220" y2="256" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
@@ -65,10 +66,18 @@
     <text x="295" y="391" text-anchor="middle">issue_triage</text>
     <rect x="346" y="374" width="86" height="26" rx="13" fill="#eff6ff" stroke="#bfdbfe"/>
     <text x="389" y="391" text-anchor="middle">safety</text>
+    <rect x="64"  y="408" width="86" height="26" rx="13" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="107" y="425" text-anchor="middle" font-size="11">plan_gate</text>
+    <rect x="158" y="408" width="86" height="26" rx="13" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="201" y="425" text-anchor="middle" font-size="11">evidence_gate</text>
+    <rect x="252" y="408" width="86" height="26" rx="13" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="295" y="425" text-anchor="middle" font-size="11">docs_gate</text>
+    <rect x="346" y="408" width="86" height="26" rx="13" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="389" y="425" text-anchor="middle" font-size="11">arch_gate</text>
   </g>
-  <text x="64" y="432" font-size="12" fill="#64748b">every feature = heads per provider</text>
-  <text x="64" y="450" font-size="12" fill="#64748b">auto-detect from diff · --task to override</text>
-  <text x="64" y="468" font-size="12" fill="#64748b">new task = define heads, no provider code</text>
+  <text x="64" y="466" font-size="12" fill="#64748b">every feature = heads per provider</text>
+  <text x="64" y="484" font-size="12" fill="#64748b">auto-detect from changed paths · --task to override</text>
+  <text x="64" y="502" font-size="12" fill="#64748b">new task = define heads, no provider code</text>
 
   <!-- col 2: guards -->
   <text x="490" y="326" font-size="14" font-weight="700" fill="#dc2626">② guards</text>
@@ -80,7 +89,7 @@
   <text x="490" y="470" font-size="12" fill="#64748b">credentials via env vars only</text>
 
   <!-- col 3: provider routing -->
-  <text x="800" y="326" font-size="14" font-weight="700" fill="#059669">③ provider routing</text>
+  <text x="800" y="326" font-size="14" font-weight="700" fill="#059669">③ provider routing — auto → sys1</text>
   <rect x="800" y="340" width="376" height="58" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
   <rect x="800" y="340" width="4" height="58" rx="2" fill="#475569"/>
   <text x="820" y="364" font-size="13" font-weight="600" fill="#0f172a">local GLiNER — /private/tmp/gliner-decide</text>
@@ -95,6 +104,7 @@
   <rect x="800" y="476" width="4" height="58" rx="2" fill="#059669"/>
   <text x="820" y="500" font-size="13" font-weight="600" fill="#0f172a">Jev — jev-1.13.0</text>
   <text x="820" y="520" font-size="11.5" fill="#065f46">hosted · choice / score / noul questions</text>
+  <text x="800" y="552" font-size="11.5" fill="#64748b">roster: glide,drex,jev · size gate · by_task overrides · candidates opt-in</text>
 
   <!-- arrows engine → bottom row -->
   <line x1="320" y1="570" x2="320" y2="616" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
@@ -114,9 +124,9 @@
   <rect x="640" y="620" width="560" height="150" rx="12" fill="#ffffff" stroke="#e2e8f0"/>
   <circle cx="660" cy="648" r="5" fill="#059669"/>
   <text x="674" y="653" font-size="16" font-weight="700" fill="#0f172a">calibration loop</text>
-  <text x="660" y="684" font-size="13" fill="#334155">plot confidence vs human-accepted rate</text>
-  <text x="660" y="708" font-size="13" fill="#334155">fit per-provider × per-head thresholds</text>
-  <text x="660" y="732" font-size="13" fill="#334155">export: dev-decisions log --format json</text>
+  <text x="660" y="684" font-size="13" fill="#334155">dispositions pair with events → feedback rows</text>
+  <text x="660" y="708" font-size="13" fill="#334155">calibration cmd: per-head counts · trend · fit</text>
+  <text x="660" y="732" font-size="13" fill="#334155">floors fit only when a head qualifies (≥20, span)</text>
   <text x="660" y="752" font-size="10.5" fill="#94a3b8" letter-spacing="1">THRESHOLDS DON'T TRANSFER — FIT LOCALLY</text>
 
   <!-- feedback arrow -->

@@ -124,7 +124,7 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `arch_gate` | `arch-gate` command | Claim vs documented architecture |
 | `plan_surface_map` / `plan_deps` | `plan-surface` command | Criterion->module map / pairwise criterion order |
 
-![v0.2.0 workflows](docs/workflows.svg)
+![workflows — the gate family](docs/workflows.svg)
 
 ## Contract gates
 

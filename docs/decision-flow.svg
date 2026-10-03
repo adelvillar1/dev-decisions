@@ -64,8 +64,8 @@
   <!-- 5 task selection -->
   <rect x="150" y="486" width="600" height="74" rx="12" fill="#eff6ff" stroke="#93c5fd"/>
   <text x="450" y="512" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">4 · task selection — task registry</text>
-  <text x="450" y="534" text-anchor="middle" font-size="12" fill="#3730a3">auto: deps files → deps_risk · docs-only → docs_drift · else change</text>
-  <text x="450" y="551" text-anchor="middle" font-size="12" fill="#3730a3">explicit --task overrides · 8 tasks, each with per-provider heads</text>
+  <text x="450" y="534" text-anchor="middle" font-size="12" fill="#3730a3">auto: changed paths → deps_risk / docs_drift · else change</text>
+  <text x="450" y="551" text-anchor="middle" font-size="12" fill="#3730a3">explicit --task overrides · 8+ tasks incl. the gate corpora, per-provider heads</text>
 
   <line x1="450" y1="560" x2="450" y2="586" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
 
@@ -73,14 +73,14 @@
   <rect x="150" y="590" width="600" height="74" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
   <text x="450" y="616" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">5 · provider routing</text>
   <g font-size="12" font-weight="600">
-    <rect x="205" y="630" width="120" height="24" rx="12" fill="#f1f5f9" stroke="#cbd5e1"/>
-    <text x="265" y="646" text-anchor="middle" fill="#475569">local GLiNER</text>
-    <rect x="340" y="630" width="100" height="24" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
-    <text x="390" y="646" text-anchor="middle" fill="#b45309">Decide</text>
-    <rect x="455" y="630" width="90" height="24" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
-    <text x="500" y="646" text-anchor="middle" fill="#047857">Jev</text>
-    <rect x="560" y="630" width="90" height="24" rx="12" fill="#faf5ff" stroke="#e9d5ff"/>
-    <text x="605" y="646" text-anchor="middle" fill="#7e22ce">both</text>
+    <rect x="170" y="630" width="230" height="24" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
+    <text x="285" y="646" text-anchor="middle" fill="#047857">auto → sys1 (glide,drex,jev)</text>
+    <rect x="415" y="630" width="80" height="24" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+    <text x="455" y="646" text-anchor="middle" fill="#b45309">decide</text>
+    <rect x="510" y="630" width="70" height="24" rx="12" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="545" y="646" text-anchor="middle" fill="#475569">local</text>
+    <rect x="595" y="630" width="70" height="24" rx="12" fill="#faf5ff" stroke="#e9d5ff"/>
+    <text x="630" y="646" text-anchor="middle" fill="#7e22ce">both</text>
   </g>
 
   <line x1="450" y1="664" x2="450" y2="690" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
