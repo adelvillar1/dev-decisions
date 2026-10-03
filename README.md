@@ -28,7 +28,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 | Contract gates + fan-out | **Jev** (`jev-1.13.0`, typesafe) | Choice/Score/Noul, fan-out native |
 | Classification | **GLiNER2.5-Decide** (fastino hosted) | Structured labels: diff type · risk · suggested labels |
 | Extraction | **GLiNER2.5** (fastino hosted) | Span extraction — PII redaction for `scan-staged --deep`; a different model from Decide, different use |
-| Bulk triage | **Julia** (`julia-1`, supersoniclabs) | Cheapest hosted; calibrated out of the default chain (1/6 agreement) — bulk or by-task only |
+| Evaluating | **Julia** (`julia-1`, supersoniclabs) | BERT-based, systemone-shaped wire; cheapest hosted. Calibrated out of the default chain — where it fits is still being figured out |
 | Eval only (not in active roster) | **ModernBERT** | Calibration comparison, kept available |
 
 ### Candidate models (opt-in, via sys1 flags)
