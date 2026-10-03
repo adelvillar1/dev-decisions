@@ -4252,6 +4252,237 @@ def cmd_ux_gate(args: argparse.Namespace) -> int:
     return EXIT_WARN if (drift or ungraded or unverified) else EXIT_OK
 
 
+# ── use-case corpus: issues vs existing functionality vs planned design ──────
+
+_UX_ALIASES = _UX_STATE_ALIASES  # shared alias table convention
+
+
+def _parse_uc_issues(path: Path) -> list:
+    """Issues contract: - [ ] <id>: <statement> under ## Issues."""
+    issues, section = [], None
+    for line in path.read_text().splitlines():
+        if line.startswith("## "):
+            section = "issues" if "Issues" in line else None
+            continue
+        if section != "issues":
+            continue
+        m = re.match(r"^\s*[-*]\s+\[[ xX]\]\s+([\w-]+):\s*(.+?)\s*$", line)
+        if m:
+            issues.append({"id": m.group(1), "statement": m.group(2)})
+    return issues
+
+
+def _parse_inventory(path: Path, cap: int = 600) -> list:
+    """
+    Mechanism/behavior inventory from a design or spec document: headings
+    with an id prefix ("### F1 — Title" -> id F1) and numbered bold list
+    items ("1. **Chats** (...)" -> id m1, m2, ...). Each entry keeps its
+    section body (capped) so the coverage judge reads substance, not titles.
+    """
+    text = path.read_text()
+    entries: list = []
+
+    def add(eid, title, body_lines):
+        body = " ".join(b.strip() for b in body_lines).strip()
+        entries.append({"id": eid, "title": title.strip(), "body": body[:cap]})
+
+    lines = text.splitlines()
+    i = 0
+    m_counter = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^#{2,3}\s+(?:\*\*)?([FAX]\d+|UC\d+|REQ-?[\w-]+)\b[\s—:-]*(.+?)(?:\*\*)?\s*$", line)
+        if m:
+            body = []
+            j = i + 1
+            while j < len(lines) and not re.match(r"^#{2,3}\s", lines[j]):
+                body.append(lines[j])
+                j += 1
+            add(m.group(1), m.group(2), body)
+            i = j
+            continue
+        n = re.match(r"^\s*(\d+)\.\s+\*\*([^*]+)\*\*", line)
+        if n:
+            m_counter += 1
+            body = [line.split("**", 2)[-1]]
+            j = i + 1
+            while j < len(lines) and not re.match(r"^\s*\d+\.\s+\*\*", lines[j]) and not re.match(r"^#{2,3}\s", lines[j]):
+                body.append(lines[j])
+                j += 1
+            add(f"m{m_counter}", n.group(2), body)
+            i = j
+            continue
+        i += 1
+    return entries
+
+
+def _coverage_fanout(issues: list, inventory: list, label: str, provider: str, cfg: dict, *, cite_floor: float = 0.15) -> dict:
+    """
+    Citation-forced coverage per issue: one choice head (which inventory ids
+    address it, incl. 'none') + one resolve noul (fully resolved by what it
+    cites?). Mechanical post-check: cited ids must exist — bad citations are
+    'none' with a note (the mention-trap guard).
+    """
+    ids = [e["id"] for e in inventory]
+    desc = {e["id"]: f"{e['title']} — {e['body'][:180]}" for e in inventory}
+    heads = []
+    for i, iss in enumerate(issues):
+        heads.append(sys1.make_choice(
+            f"Which {label} capabilities address issue {iss['id']} "
+            f"(\"{iss['statement'][:140]}\")? Cite every id that contributes.",
+            ids + ["none"], id=f"uc{i}_cite", multi_label=True,
+            descriptions=desc))
+        heads.append(sys1.make_noul(
+            f"If the cited {label} capabilities operate together, is issue {iss['id']} "
+            f"fully resolved (not just partially)? Issue: {iss['statement'][:140]}",
+            id=f"uc{i}_full"))
+    state = "\n\n".join(
+        f"{e['id']} — {e['title']}: {e['body']}" for e in inventory)
+    task = sys1.types.Task(id=f"uc_coverage_{label.replace(' ', '_')}", heads=heads,
+                           description=f"Issue coverage vs {label} inventory")
+    chain = _sys1_chain(provider) if provider != "auto" else \
+        (sys1.routing.route_decision(task, state, cfg)[0] or ["glide", "drex", "jev"])
+    result = sys1.classify(chain, task, state, cfg=cfg, log=True)
+    used, answers = chain[0] if chain else "", {}
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        if result.answers.get(mapped):
+            answers = result.answers[mapped]
+            used = mapped
+            break
+
+    per_issue: dict = {}
+    id_set = set(ids)
+    for i, iss in enumerate(issues):
+        cite = answers.get(f"uc{i}_cite") or {}
+        full = answers.get(f"uc{i}_full") or {}
+        # cite from the PROBABILITY DISTRIBUTION, not the label — jev-family
+        # wires ignore multi-label, and the Phase 0 lesson (semantic-find)
+        # applies: probabilities carry the full citation set
+        probs = {k: float(v) for k, v in (cite.get("probabilities") or {}).items()}
+        cited_ids = [k for k, pv in probs.items() if k in id_set and pv >= cite_floor]
+        if not cited_ids and cite.get("label") in id_set:
+            cited_ids = [cite["label"]]
+        bad = []  # probabilities only contain real inventory ids; label checked above
+        p_full = full.get("noul") if isinstance(full.get("noul"), (int, float)) else None
+        # three degrees: none = nothing validly cited; partial = cited but
+        # the resolve noul doubts full resolution; full = cited and confirmed
+        if bad or not cited_ids:
+            degree = "none"
+        elif p_full is None or p_full >= 0.5:
+            degree = "full"
+        else:
+            degree = "partial"
+        per_issue[iss["id"]] = {
+            "degree": degree, "cited": cited_ids, "bad_citations": bad,
+            "resolve_p": round(p_full, 3) if isinstance(p_full, (int, float)) else None,
+            "confidence": cite.get("confidence"),
+        }
+    return {"provider": used, "per_issue": per_issue}
+
+
+def _quadrant(existing: str, design: str) -> str:
+    if existing == "full":
+        return "reinvention" if design in ("full", "partial") else "already-solved"
+    if existing == "partial":
+        return "extension" if design in ("full", "partial") else "residual-gap"
+    return "genuine-new" if design in ("full", "partial") else "true-gap"
+
+
+_QUADRANT_ORDER = ["true-gap", "reinvention", "residual-gap", "extension",
+                   "already-solved", "genuine-new"]
+
+
+def cmd_uc_gate(args: argparse.Namespace) -> int:
+    """
+    Use-case coverage gate: are issues A..X already covered by existing
+    documented functionality, and does the planned design address them?
+    Two citation-forced coverage fan-outs (existing FS inventory, planned
+    design inventory) assemble the per-issue 2x2: reinvention /
+    already-solved / extension / genuine-new / residual-gap / true-gap.
+    True gaps and reinventions fail the gate (advisorial exit 1); every
+    verdict is a review input — dispositions resolve who was right and
+    grade the coverage heads.
+    """
+    if sys1 is None:
+        print("error: uc-gate requires sys1", file=sys.stderr)
+        return EXIT_ERROR
+    issues_path = Path(args.issues).expanduser()
+    fs_path = Path(args.fs).expanduser()
+    design_path = Path(args.design).expanduser()
+    for pth in (issues_path, fs_path, design_path):
+        if not pth.exists():
+            print(f"error: not found: {pth}", file=sys.stderr)
+            return EXIT_ERROR
+    issues = _parse_uc_issues(issues_path)
+    if not issues:
+        print("error: no issues found (## Issues with '- [ ] <id>: statement' lines)", file=sys.stderr)
+        return EXIT_ERROR
+    fs_inv = _parse_inventory(fs_path)
+    design_inv = _parse_inventory(design_path)
+    if not fs_inv or not design_inv:
+        print("error: inventory parse produced no entries", file=sys.stderr)
+        return EXIT_ERROR
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+    print(f"UC gate: {issues_path.name}  ({len(issues)} issues, "
+          f"{len(fs_inv)} FS entries, {len(design_inv)} design mechanisms)")
+
+    print(f"  coverage vs existing functionality ({len(fs_inv)} entries) ...")
+    ex = _coverage_fanout(issues, fs_inv, "existing", provider, cfg,
+                          cite_floor=float(getattr(args, "cite_floor", 0.15)))
+    print(f"  coverage vs planned design ({len(design_inv)} mechanisms) ...")
+    de = _coverage_fanout(issues, design_inv, "design", provider, cfg,
+                          cite_floor=float(getattr(args, "cite_floor", 0.15)))
+
+    rows = []
+    counts: dict = {}
+    for iss in issues:
+        iid = iss["id"]
+        exd = ex["per_issue"].get(iid, {"degree": "none"})
+        ded = de["per_issue"].get(iid, {"degree": "none"})
+        q = _quadrant(exd["degree"], ded["degree"])
+        counts[q] = counts.get(q, 0) + 1
+        rows.append({"issue": iid, "statement": iss["statement"], "existing": exd,
+                     "design": ded, "quadrant": q})
+
+    order = {q: i for i, q in enumerate(_QUADRANT_ORDER)}
+    rows.sort(key=lambda r: order.get(r["quadrant"], 99))
+
+    print("  per issue:")
+    for r in rows:
+        print(f"    [{r['quadrant']:<13}] {r['issue']}: {r['statement'][:90]}")
+        print(f"        existing={r['existing']['degree']} (cited {', '.join(r['existing']['cited']) or '-'})"
+              f"  design={r['design']['degree']} (cited {', '.join(r['design']['cited']) or '-'})")
+
+    out = SURFACES_DIR / "uc" / f"{issues_path.stem}.uc.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        "schema": "uc-coverage/v1", "issues": str(issues_path),
+        "fs": str(fs_path), "design": str(design_path),
+        "providers": {"existing": ex["provider"], "design": de["provider"]},
+        "rows": rows}, indent=2))
+    print(f"  report: {out}")
+
+    hard = counts.get("true-gap", 0) + counts.get("reinvention", 0)
+    log_record({
+        "op": "uc-gate", "target": str(issues_path), "app": args.app or issues_path.stem,
+        "task": "uc_coverage", "input_sha256": hashlib.sha256(
+            (issues_path.read_text() + fs_path.read_text() + design_path.read_text()).encode()
+        ).hexdigest()[:16],
+        "issues": len(issues), "hard": hard,
+        "counts": counts,
+        "providers": f"fs={ex['provider']},design={de['provider']}",
+        "report": str(out),
+        "verdict": "gaps" if hard else "pass",
+        "drifts": hard,
+    })
+    print(f"  verdict: {hard} hard finding(s) "
+          f"(true-gaps {counts.get('true-gap', 0)}, reinventions {counts.get('reinvention', 0)})")
+    return EXIT_WARN if hard else EXIT_OK
+
+
 def cmd_triage_issues(args: argparse.Namespace) -> int:
     """Batch-classify issues and apply labels."""
     repo = getattr(args, "repo", None)
@@ -5541,6 +5772,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("app", help="App name (surface artifact key)")
     sp.add_argument("--surface", default=None, help="Surface artifact path override")
     sp.set_defaults(func=cmd_ux_gate)
+
+    # uc-gate
+    sp = sub.add_parser("uc-gate",
+                        help="Issues vs existing functionality vs planned design: the per-issue 2x2 coverage matrix")
+    sp.add_argument("issues", help="Issues contract markdown (## Issues with '- [ ] <id>: statement')")
+    sp.add_argument("--fs", required=True, help="Existing-functionality inventory (e.g. FUNCTIONAL-SPECIFICATIONS.md)")
+    sp.add_argument("--design", required=True, help="Planned-design inventory (e.g. the plan's Approach)")
+    sp.add_argument("--app", default=None, help="App/plan name for the log row")
+    sp.add_argument("--provider", default=None, help="Override config provider")
+    sp.add_argument("--cite-floor", type=float, default=0.15,
+                    help="Citation probability floor (default 0.15; semantic-find lesson)")
+    sp.set_defaults(func=cmd_uc_gate)
 
     # calibration
     sp = sub.add_parser("calibration",

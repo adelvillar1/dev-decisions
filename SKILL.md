@@ -162,6 +162,10 @@ dev-decisions plan-gate plan.md --tests tests/    # + criteria-vs-test-suite cov
 
 **Mechanical pushdown:** a diff whose changed paths are ALL doc files gets its drift noul forced to no in code (not the model), and task routing reads changed paths instead of diff body text (a code diff mentioning `.md` no longer routes to docs_drift).
 
+## UC corpus (issues vs existing functionality vs planned design)
+
+`uc-gate <issues.md> --fs FUNCTIONAL-SPECIFICATIONS.md --design plan.md`: the per-issue 2x2 coverage matrix (reinvention / already-solved / extension / genuine-new / residual-gap / true-gap) from two citation-forced coverage fan-outs — one against existing documented functionality, one against the planned design's mechanisms. Issues contract: `## Issues` with `- [ ] <id>: statement` checkboxes. Coverage cites PROBABILITIES not labels (jev-family wires ignore multi-label; the cite floor defaults 0.15). `auto` routes through sys1. **Deployment constraint learned in probe (2026-10-03): the FS/design inventories must PREDATE the design being judged — a retroactive run against a post-hoc FS reads the plan's own output as "existing" and reports reinventions (citation precision was 12/12; quadrants 0/6, artifact). Valid mode = design-time, before the FS absorbs the new functionality.**
+
 ## UX corpus (ux-surface + ux-gate)
 
 The UX design corpus: `docs/ux/<route>.md` contracts (states matrix + control inventory) are verified against rendered captures from the ux-capture kit (workspace/ux-capture-probe: playwright pixels + DOM dump + a VLM capture layer whose output triangled against the DOM — VLM-vs-DOM disagreement is a perception flag, DOM-vs-spec an implementation gap). `ux-surface <app>` builds the routes x states x verification artifact (confirmed-drift / flags-ungraded / clean / unverified); `ux-gate <app>` gates it: human-graded confirmed drift fails, ungraded flags and unverified states warn, semantic state-match stays WARN-only until its floor is fitted (Phase 0: 2/5). State names may contain hyphens (`has-data`); capture cell states normalize (`real` -> `has-data`).
