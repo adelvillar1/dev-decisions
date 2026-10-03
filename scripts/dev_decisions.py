@@ -4240,7 +4240,7 @@ def cmd_ux_gate(args: argparse.Namespace) -> int:
     gaps = bool(drift)
     verdict = "drift" if drift else ("flags" if (ungraded or unverified) else "pass")
     log_record({
-        "op": "ux-gate", "app": args.app, "task": "ux_gate",
+        "op": "ux-gate", "app": args.app, "target": args.app, "task": "ux_gate",
         "input_sha256": hashlib.sha256(surface_path.read_bytes()).hexdigest()[:16],
         "confirmed_drift": len(drift), "ungraded_flags": len(ungraded),
         "drifts": len(drift),
@@ -4706,6 +4706,7 @@ _GATE_OP_TARGET_FIELD = {
     "docs-gate": ("docs-gate", "plan"),
     "evidence-gate": ("evidence-gate", "plan"),
     "pr-gate": ("pr-gate", "repo"),
+    "ux-gate": ("ux-gate", "target"),
     "zcode-gate": ("zcode-gate", "command"),
 }
 
