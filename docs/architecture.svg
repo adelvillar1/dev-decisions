@@ -104,8 +104,8 @@
     <text x="816" y="438" fill="#475569" font-weight="600">decide</text>
     <text x="872" y="438" fill="#64748b">chat-wire fallback · declines on ambiguity</text>
     <rect x="800" y="450" width="376" height="24" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
-    <text x="816" y="466" fill="#475569" font-weight="600">local GLiNER</text>
-    <text x="908" y="466" fill="#64748b">offline · sensitive repos · never auto-routed</text>
+    <text x="816" y="466" fill="#475569" font-weight="600">local venv (GLiNER)</text>
+    <text x="940" y="466" fill="#64748b">optional · offline · not in use</text>
     <rect x="800" y="478" width="376" height="24" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
     <text x="816" y="494" fill="#475569" font-weight="600">modernbert</text>
     <text x="898" y="494" fill="#64748b">eval only — calibration comparison</text>
