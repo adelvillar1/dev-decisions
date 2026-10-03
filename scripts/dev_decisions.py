@@ -2778,6 +2778,59 @@ def _parse_plan_criteria(text: str) -> list[str]:
     return out
 
 
+_UX_CONTRACT_DIR = "docs/ux"
+
+
+def _plan_structure(text: str) -> dict:
+    """Mechanical structural checks over the plan document (no model).
+    Returns {ok, warnings: [(code, message)]} — the plan-of-the-plan check."""
+    warnings: list = []
+
+    # frontmatter
+    fm = {}
+    if text.startswith("---"):
+        block = text.split("---")[1]
+        for line in block.splitlines():
+            m = re.match(r"^(\w+):\s*(\S+)", line)
+            if m:
+                fm[m.group(1)] = m.group(2)
+    for field in ("status", "created", "slug"):
+        if field not in fm:
+            warnings.append(("no-frontmatter-" + field,
+                             f"frontmatter missing `{field}` — plan-reconcile and the ledger need it"))
+
+    # required sections
+    def has_section(name_fragment: str) -> bool:
+        return any(name_fragment in h for h in re.findall(r"^##\s+(.+)$", text, re.M))
+
+    for fragment, code, why in (
+        ("Acceptance criteria", "no-criteria-section", "criteria checkboxes define C<i> for every gate"),
+        ("Approach", "no-approach-section", "arch-gate reads claims from the Approach"),
+        ("Linked artifacts", "no-linked-artifacts", "docs-gate consumes this section"),
+        ("Verification", "no-verification", "evidence-gate expects evidence per criterion"),
+        ("Out of scope", "no-out-of-scope", "scope-out rationale feeds dispositions"),
+    ):
+        if not has_section(fragment):
+            warnings.append((code, f"missing `## {fragment}` — {why}"))
+
+    # criteria parseability: single-line checkboxes (order = C<i> identity)
+    criteria = re.findall(r"^\s*[-*]\s+\[[ xX]\]\s+.*$", text, re.M)
+    if criteria:
+        multi = [c for c in text.splitlines()
+                 if re.match(r"^\s*[-*]\s+\[[ xX]\]\s*$", c)]
+        if multi:
+            warnings.append(("empty-checkbox", f"{len(multi)} empty checkbox line(s) — criteria must be single-line statements"))
+
+    # ux contract references resolve
+    for ref in re.findall(r"docs/ux/([\w-]+)\.md", text):
+        if not (Path("docs/ux") / f"{ref}.md").exists() and \
+           not (Path.cwd() / "docs/ux" / f"{ref}.md").exists():
+            warnings.append(("ux-contract-missing",
+                             f"referenced ux contract docs/ux/{ref}.md not found in this repo"))
+
+    return {"ok": not warnings, "warnings": warnings}
+
+
 def cmd_plan_gate(args: argparse.Namespace) -> int:
     """
     Gate a plan against its acceptance criteria (the plan-as-contract check):
@@ -2802,6 +2855,15 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     if not criteria:
         print("error: no acceptance criteria found (checkbox lines) and no --criteria-file given.", file=sys.stderr)
         return EXIT_ERROR
+
+    # structural preflight — mechanical, before any model call: the plan must
+    # carry what the whole toolchain consumes (criteria order = C<i>, sections
+    # per consumer, resolvable ux contract references)
+    structure = _plan_structure(text)
+    for code, msg in structure["warnings"]:
+        print(f"    [STRUCTURE] {msg} ({code})")
+    if structure["warnings"]:
+        print(f"  structure: {len(structure['warnings'])} warning(s) — these starve downstream tools")
 
     cfg = load_config(None)
     provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
@@ -2953,6 +3015,7 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
         "heads": {hid: {k: a[k] for k in ("noul", "label", "confidence", "mean", "stdev", "unstable", "draws") if k in a}
                   for hid, a in answers.items() if isinstance(a, dict) and not a.get("_declined")},
         "untested_criteria": untested,
+        "structure_warnings": [code for code, _msg in structure["warnings"]],
         "test_files": len(test_files),
         "verdict": "gaps" if gaps else "pass",
         "latency_ms": used_latency,
