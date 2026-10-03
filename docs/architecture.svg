@@ -93,7 +93,7 @@
   <g font-size="12">
     <rect x="800" y="338" width="376" height="24" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
     <text x="816" y="354" fill="#065f46" font-weight="600">glide</text>
-    <text x="866" y="354" fill="#64748b">default head · size gate routes long inputs to drex</text>
+    <text x="870" y="354" fill="#64748b">routed default head · size gate → drex</text>
     <rect x="800" y="366" width="376" height="24" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
     <text x="816" y="382" fill="#065f46" font-weight="600">drex</text>
     <text x="860" y="382" fill="#64748b">131k context · long states</text>
@@ -101,19 +101,14 @@
     <text x="816" y="410" fill="#065f46" font-weight="600">jev</text>
     <text x="852" y="410" fill="#64748b">choice / score / noul · fan-out native</text>
     <rect x="800" y="422" width="376" height="24" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
-    <text x="816" y="438" fill="#475569" font-weight="600">decide</text>
-    <text x="872" y="438" fill="#64748b">chat-wire fallback · declines on ambiguity</text>
+    <text x="816" y="438" fill="#475569" font-weight="600">gliner2.5-decide (hosted)</text>
+    <text x="998" y="438" fill="#64748b">classification: type · risk · labels</text>
     <rect x="800" y="450" width="376" height="24" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
-    <text x="816" y="466" fill="#475569" font-weight="600">local venv (GLiNER)</text>
-    <text x="940" y="466" fill="#64748b">optional · offline · not in use</text>
-    <rect x="800" y="478" width="376" height="24" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
-    <text x="816" y="494" fill="#475569" font-weight="600">modernbert</text>
-    <text x="898" y="494" fill="#64748b">eval only — calibration comparison</text>
-    <rect x="800" y="506" width="376" height="24" rx="12" fill="#fffbeb" stroke="#fde68a"/>
-    <text x="816" y="522" fill="#b45309" font-weight="600">julia</text>
-    <text x="862" y="522" fill="#64748b">calibrated OUT (1/6 agreement) · bulk triage only</text>
-    <rect x="800" y="534" width="376" height="24" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
-    <text x="816" y="550" fill="#475569">candidates opt-in: clm · openjev · kev · tev1 · laya …</text>
+    <text x="816" y="466" fill="#475569" font-weight="600">gliner2.5 (hosted)</text>
+    <text x="966" y="466" fill="#64748b">extraction: PII spans (--deep scan)</text>
+    <rect x="800" y="478" width="376" height="24" rx="12" fill="#fffbeb" stroke="#fde68a"/>
+    <text x="816" y="494" fill="#b45309" font-weight="600">julia</text>
+    <text x="862" y="494" fill="#64748b">calibrated out of the chain · bulk triage</text>
   </g>
   <text x="800" y="552" font-size="11.5" fill="#64748b">roster: glide,drex,jev · size gate · by_task overrides · candidates opt-in</text>
 
