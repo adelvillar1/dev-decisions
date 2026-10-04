@@ -166,6 +166,19 @@ dev-decisions ux-surface my-app --ux-docs docs/ux
 dev-decisions ux-gate my-app
 ```
 
+### Quality loops (capture kit)
+
+The ux-capture kit (external, stdlib-covenant excepted) generalized the
+judge pattern to seven producer families — screens, audio, generated images,
+charts, spreadsheets, documents, presentations — each with a
+produce→check→revise→re-check **quality loop** in the same shape as the
+gates: deterministic matching first, sys1 judgment on the prose residue,
+bounded revisions, contract and rubric hashes pinned per run. Graded rows
+land in this repo's calibration stores under the `*_capture` task families,
+so `calibration` reports floor-fit readiness for loop heads exactly like
+gate heads. Convergence and per-adjuster-model efficiency surface on the
+second-brain tower (`/loops.html`).
+
 ## Plan reconcile + calibration
 
 `plan-reconcile <plan.md>` grades a plan's surface artifact against its actual commits (tau, edge precision, feedback rows). `calibration` reports per-head graded-row counts, accuracy curves, and floor-fit readiness across both feedback stores. See SKILL.md for detail.
