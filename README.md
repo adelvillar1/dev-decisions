@@ -1,12 +1,12 @@
 # dev-decisions
 
-Decision-model gates for git + ZCode workflows. Scans secrets/PII from commits, classifies diffs using multiple providers, gates plans/evidence/docs/architecture as contracts, and logs every decision and graded outcome to JSONL for calibration.
+The verification and calibration layer for AI-aided development: it gates the operations, grades the outcomes, and earns autonomy on evidence — from commit hygiene to plan contracts to rendered UI. Scans secrets/PII from commits, classifies diffs using multiple providers, gates plans/evidence/docs/architecture as contracts, and logs every decision and graded outcome to JSONL for calibration.
 
 **v0.3.0** — provider telemetry, live dashboard, feedback loop for calibration, ModernBERT eval provider.
 
 ## Architecture
 
-Three layers, each independently useful:
+Three deployment layers (git hooks, a global ZCode hook, and the CLI), each independently useful — and one methodology that now spans the whole development cycle: gates before work (plan-surface, plan-gate), gates after it (evidence, docs, architecture, the rendered UX), and calibration of the judges themselves (floors, earned autonomy, trust stats). Internally the implementation is a package: `scripts/devdec/` — `config`, `judgment`, `gitops`, `workflow`, `gates`, `corpora`, `dashboard`, `cli` — with `scripts/dev_decisions.py` as a compatibility shim preserving the entry path.
 
 | Layer | What it does | When it runs |
 |---|---|---|

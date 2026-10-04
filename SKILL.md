@@ -5,7 +5,7 @@ description: Use decision models (Jev, GLiNER-2.5-Decide) to classify diffs, sca
 
 # dev-decisions: decision-model gates for git + ZCode workflows
 
-A stdlib-only Python CLI (`dev-decisions`) that uses hosted decision models to classify diffs, scan for secrets/PII, gate PRs/issues, generate changelogs, and log every decision to JSONL as a calibration set for fitting thresholds later.
+A stdlib-only Python CLI (`dev-decisions`) — the verification and calibration layer for AI-aided development: classifies diffs, scans for secrets/PII, gates PRs/issues/plans/evidence/docs/architecture, and logs every decision to JSONL as a calibration set for fitting thresholds (and earning autonomy) later.
 
 ## Quick start
 
