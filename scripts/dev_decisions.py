@@ -5956,4 +5956,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Prefer the modular package (scripts/devdec/) when it sits beside this
+    # file: it is the canonical home post-split and new ops land there first.
+    # This single file remains the standalone fallback — a checkout with no
+    # package still runs every op from the code below.
+    try:
+        scripts_dir = Path(__file__).resolve().parent
+        if (scripts_dir / "devdec" / "cli.py").is_file():
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            from devdec.cli import main as _package_main
+
+            sys.exit(_package_main())
+    except Exception:
+        pass
     sys.exit(main())

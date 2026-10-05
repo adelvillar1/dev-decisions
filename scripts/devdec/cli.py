@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Callable
 
 from .workflow import cmd_bulk_install, cmd_classify_diff, cmd_config, cmd_doctor, cmd_fleet_scan, cmd_install_hooks, cmd_log, cmd_remove_hooks, cmd_scan_staged, cmd_status, cmd_zcode_gate
-from .gates import cmd_arch_gate, cmd_calibration, cmd_disposition, cmd_docs_gate, cmd_evidence_gate, cmd_feedback, cmd_plan_gate, cmd_plan_reconcile, cmd_plan_surface, cmd_pr_gate
+from .gates import cmd_arch_gate, cmd_calibration, cmd_disposition, cmd_docs_gate, cmd_evidence_gate, cmd_feedback, cmd_judge, cmd_plan_gate, cmd_plan_reconcile, cmd_plan_surface, cmd_pr_gate
 from .corpora import cmd_changelog, cmd_triage_issues, cmd_uc_gate, cmd_ux_gate, cmd_ux_surface
 from .dashboard import cmd_dashboard
-from .config import EXIT_OK, VERSION
+from .config import DEFAULT_MAX_DIFF_CHARS, EXIT_OK, VERSION
+from .judgment import PROVIDER_CHOICES
 
 # section: cli (moved verbatim from dev_decisions.py)
 
@@ -134,6 +135,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
     sp.set_defaults(func=cmd_evidence_gate)
+
+    # judge (generic)
+    sp = sub.add_parser("judge",
+                        help="Ad-hoc heads over one text, classified through sys1 and logged as a store row")
+    sp.add_argument("heads", help="JSON: [{id, kind: choice|noul, task, labels}] (one head object also accepted)")
+    sp.add_argument("--text", default=None, help="The text to judge")
+    sp.add_argument("--text-file", default=None, help="File whose contents are judged (instead of --text)")
+    sp.add_argument("--task-id", default="judge", help="Task id recorded with the row (default: judge)")
+    sp.add_argument("--description", default=None, help="Task description")
+    sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
+                    help="Override config provider")
+    sp.add_argument("--max-chars", type=int, default=DEFAULT_MAX_DIFF_CHARS,
+                    help="Cap on judged text length")
+    sp.set_defaults(func=cmd_judge)
 
     # plan-reconcile
     sp = sub.add_parser("plan-reconcile",

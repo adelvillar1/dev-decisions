@@ -771,6 +771,113 @@ def cmd_evidence_gate(args: argparse.Namespace) -> int:
     return EXIT_WARN if gaps else EXIT_OK
 
 
+def cmd_judge(args: argparse.Namespace) -> int:
+    """
+    Generic judgment op: ad-hoc heads over one text, classified through sys1
+    and logged as a store row. The shared judging surface for classifications
+    the named gates do not carry — a workflow runtime's dispatch gate, a
+    swarm's atomicity check, a one-off probe. Named gates stay as their own
+    ops (and may be promoted from a judge pattern once it earns a name); this
+    is the catch-all beneath them, and every row it logs is a calibration row
+    like any other. Stdout is one JSON line the caller parses; the human
+    summary goes to stderr.
+    """
+    if sys1 is None:
+        print("error: judge requires sys1", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        specs = json.loads(args.heads)
+    except json.JSONDecodeError as e:
+        print(f"error: --heads is not valid JSON: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    if isinstance(specs, dict):
+        specs = [specs]
+    if not isinstance(specs, list) or not specs:
+        print("error: --heads must be a non-empty JSON array of head specs", file=sys.stderr)
+        return EXIT_ERROR
+
+    heads: list = []
+    for i, h in enumerate(specs):
+        if not isinstance(h, dict) or not str(h.get("task") or "").strip():
+            print(f"error: head {i} needs a 'task' string", file=sys.stderr)
+            return EXIT_ERROR
+        head_id = str(h.get("id") or f"h{i}")
+        kind = str(h.get("kind") or "choice").lower()
+        try:
+            if kind == "noul":
+                heads.append(sys1.make_noul(str(h["task"]), id=head_id,
+                                            descriptions=h.get("descriptions")))
+            else:
+                labels = h.get("labels")
+                if not isinstance(labels, list) or not labels:
+                    print(f"error: choice head '{head_id}' needs 'labels'", file=sys.stderr)
+                    return EXIT_ERROR
+                heads.append(sys1.make_choice(str(h["task"]), [str(l) for l in labels],
+                                              id=head_id, descriptions=h.get("descriptions")))
+        except Exception as e:  # a malformed head is a caller bug, not a crash
+            print(f"error: head '{head_id}' rejected by sys1: {e}", file=sys.stderr)
+            return EXIT_ERROR
+
+    if args.text_file:
+        try:
+            state = Path(args.text_file).read_text()
+        except OSError as e:
+            print(f"error: cannot read --text-file: {e}", file=sys.stderr)
+            return EXIT_ERROR
+    else:
+        state = args.text or ""
+    state = state[: args.max_chars]
+
+    cfg = load_config(None)
+    provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
+    task = sys1.types.Task(id=args.task_id, heads=heads,
+                           description=args.description or "ad-hoc judgment (dev-decisions judge)")
+    try:
+        chain = _sys1_chain(provider) if provider != "auto" else (
+            sys1.routing.route_decision(task, state, cfg)[0] or _sys1_chain("jev"))
+        result = sys1.classify(chain, task, state, cfg=cfg, log=False)
+    except Exception as e:
+        print(f"error: classification failed: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    answers: dict = {}
+    used_provider = chain[0] if chain else ""
+    for pid in chain:
+        mapped = _SYS1_PROVIDER_REMAP.get(pid, pid)
+        if result.answers.get(mapped):
+            answers = result.answers[mapped]
+            used_provider = mapped
+            break
+    if not answers:
+        print(f"error: no provider answered (chain: {', '.join(chain)})", file=sys.stderr)
+        return EXIT_ERROR
+
+    log_record({
+        "op": "judge",
+        "task": args.task_id,
+        "provider": used_provider,
+        "input_sha256": _sha16(state),
+        "chain": chain,
+        "head_ids": [h.id for h in heads],
+        "heads": answers,
+        "latency_ms": result.latency_ms,
+        "telemetry": result.telemetry.get(used_provider, {}),
+    })
+    print(f"judged '{args.task_id}' via {used_provider} in {result.latency_ms} ms "
+          f"({len(heads)} head{'s' if len(heads) != 1 else ''})", file=sys.stderr)
+    for h in heads:
+        a = answers.get(h.id) or {}
+        if a.get("label"):
+            conf = a.get("confidence")
+            print(f"    {h.id}: {a['label']}"
+                  f"{f' (conf {conf:.2f})' if isinstance(conf, (int, float)) else ''}", file=sys.stderr)
+        elif a.get("noul") is not None:
+            print(f"    {h.id}: noul {a['noul']:.2f}", file=sys.stderr)
+    print(json.dumps({"ok": True, "task": args.task_id, "provider": used_provider,
+                      "answers": answers, "latency_ms": result.latency_ms}))
+    return EXIT_OK
+
+
 def _parse_linked_artifacts(text: str) -> list[tuple[str, str]]:
     """Parse the '## Linked artifacts' section into (doc path, promise) pairs.
 
@@ -1542,6 +1649,7 @@ _GATE_OP_TARGET_FIELD = {
     "pr-gate": ("pr-gate", "repo"),
     "ux-gate": ("ux-gate", "target"),
     "zcode-gate": ("zcode-gate", "command"),
+    "judge": ("judge", "task"),
 }
 
 
