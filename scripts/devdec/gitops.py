@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .config import DEFAULT_MAX_DIFF_CHARS
+
 # section: gitops (moved verbatim from dev_decisions.py)
 
 # ── git helpers ──────────────────────────────────────────────────────────────
@@ -163,6 +165,8 @@ def hook_exit(code: int, args: "argparse.Namespace") -> int:
     to OK so the human's commit/push proceeds (the warning is still printed).
     The ZCode agent gate and manual runs keep EXIT_WARN so their callers can
     still see the advisory signal. Hard blocks (EXIT_BLOCK) are never softened."""
+    from .config import EXIT_OK, EXIT_WARN
+
     trigger = getattr(args, "trigger", "") or ""
     if code == EXIT_WARN and trigger.startswith("git-"):
         return EXIT_OK

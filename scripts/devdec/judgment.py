@@ -407,6 +407,8 @@ def _legacy_classify(provider: str, task: str, diff: str, cfg: dict) -> dict:
     the script still runs standalone when sys1 isn't installed.
     Returns the same shape as _sys1_classify.
     """
+    from .config import DEFAULT_MAX_DIFF_CHARS
+
     heads = get_task_heads(task, provider.split("+")[0])
     results: dict[str, dict] = {}
     providers_used: list[str] = []

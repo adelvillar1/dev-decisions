@@ -26,6 +26,7 @@ from .workflow import cmd_bulk_install, cmd_classify_diff, cmd_config, cmd_docto
 from .gates import cmd_arch_gate, cmd_calibration, cmd_disposition, cmd_docs_gate, cmd_evidence_gate, cmd_feedback, cmd_plan_gate, cmd_plan_reconcile, cmd_plan_surface, cmd_pr_gate
 from .corpora import cmd_changelog, cmd_triage_issues, cmd_uc_gate, cmd_ux_gate, cmd_ux_surface
 from .dashboard import cmd_dashboard
+from .config import EXIT_OK, VERSION
 
 # section: cli (moved verbatim from dev_decisions.py)
 

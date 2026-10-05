@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .config import EXIT_ERROR, EXIT_OK, LOG_DIR
+
 # section: dashboard (moved verbatim from dev_decisions.py)
 
 # ── dashboard ─────────────────────────────────────────────────────────────────

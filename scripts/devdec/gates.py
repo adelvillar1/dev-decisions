@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .config import load_config, log_record
+from .config import DEFAULT_MAX_DIFF_CHARS, EXIT_ERROR, EXIT_OK, EXIT_WARN, LOG_DIR, SURFACES_DIR, load_config, log_record
 from .judgment import _SYS1_PROVIDER_REMAP, _call_jev_raw, _call_local_provider, _call_modernbert_provider, _call_openai_compatible, _env_key, _extract_labels, _parse_decide_response, _parse_jev_response, _plansurface, _sys1_chain, _sys1_classify_fanout, _sys1_classify_single, _sys1_consistency, get_task_heads, sys1
 from .gitops import get_repo_root, repo_name
 from .workflow import _sha16

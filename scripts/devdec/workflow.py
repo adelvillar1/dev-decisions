@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .config import _log_dir, load_config, log_record
+from .config import CONFIG_FILE, EXIT_BLOCK, EXIT_ERROR, EXIT_OK, EXIT_WARN, _log_dir, load_config, log_record
 from .judgment import _call_local_pii_scan, _call_local_provider, _call_modernbert_provider, _diff_paths, _is_doc_path, _legacy_classify, _sys1_classify, _sys1_classify_single, detect_task_from_diff, get_task_heads, sys1
 from .gitops import effective_diff, get_repo_root, hook_exit, last_commit_diff, push_range_diff, read_push_refs, repo_name, scan_text, staged_diff
 

@@ -22,6 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+# Defined before the judgment import: judgment's gitops needs this literal, and
+# importing it from config at module scope would otherwise close a cycle.
+DEFAULT_MAX_DIFF_CHARS = 12_000
+
 from .judgment import sys1
 
 # section: config (moved verbatim from dev_decisions.py)
@@ -35,7 +39,6 @@ LOG_DIR = Path.home() / ".local" / "share" / "dev-decisions" / "logs"
 SURFACES_DIR = Path.home() / ".local" / "share" / "dev-decisions" / "surfaces"
 SKILL_DIR = Path.home() / ".agents" / "skills" / "dev-decisions"
 HOOKS_DIR = SKILL_DIR / "hooks"
-DEFAULT_MAX_DIFF_CHARS = 12_000
 
 # Exit codes (mirrors git hook convention)
 EXIT_OK = 0
