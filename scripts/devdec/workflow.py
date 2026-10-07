@@ -167,11 +167,19 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
     changed_paths = _diff_paths(diff)
     task = args.task or detect_task_from_diff(diff, changed_paths)
 
+    # tabular lane routing: [classify] by_task may send a task to sdm1
+    by_task = cfg["classify"].get("by_task") or {}
+    effective_provider = by_task.get(task) or provider
+
     # ── classify: sys1 library if importable, inline providers otherwise ──
-    if sys1 is not None:
-        outcome = _sys1_classify(provider, task, diff, cfg)
+    if effective_provider == "sdm1":
+        from .tabular import classify_text_via_sdm1
+
+        outcome = classify_text_via_sdm1(task, diff, cfg)
+    elif sys1 is not None:
+        outcome = _sys1_classify(effective_provider, task, diff, cfg)
     else:
-        outcome = _legacy_classify(provider, task, diff, cfg)
+        outcome = _legacy_classify(effective_provider, task, diff, cfg)
 
     results: dict[str, dict] = outcome["results"]
     providers_used: list[str] = outcome["providers_used"]
@@ -181,6 +189,24 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
     elapsed_ms: int = outcome["latency_ms"]
 
     if not results:
+        # Log the failed/declined run too — a by_task sdm1 decline is a real
+        # calibration row, not a silence (C1 of the tabular-decision-lane plan).
+        log_record({
+            "op": "classify-diff",
+            "repo": repo_name(repo),
+            "trigger": args.trigger or "manual",
+            "task": task,
+            "provider": effective_provider,
+            "providers_used": providers_used,
+            "input_chars": len(diff),
+            "input_sha256": hashlib.sha256(diff.encode()).hexdigest()[:16],
+            "heads": {},
+            "overridden": [],
+            "verdict": "escalated",
+            "escalated": True,
+            "latency_ms": elapsed_ms,
+            "telemetry": provider_telemetry,
+        })
         print("No provider succeeded — diff unclassified.")
         return EXIT_BLOCK if cfg["classify"]["block_on_classification"] else EXIT_OK
 
@@ -207,6 +233,19 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         if overridden:
             print("  [pushdown] all-docs diff: drift forced to no (code rule, not model).")
 
+    # risk-prior composition (C6): cached table read only — never a network
+    # call in the hook path (the batch-only rule).
+    risk_prior_info = None
+    if getattr(args, "with_risk_prior", False):
+        from .tabular import load_risk_prior, risk_prior_for_paths
+
+        risk_prior_info = risk_prior_for_paths(load_risk_prior(), changed_paths)
+        if risk_prior_info.get("prior") is not None:
+            print(
+                f"  [risk-prior] {risk_prior_info['dir']}: revert prior "
+                f"{risk_prior_info['prior']:.2f} (cached table, no network)"
+            )
+
     print("\n".join(gate_summary))
     if escalated:
         print(f"\n⚠ Low confidence or null verdict — human review recommended (floor {cfg['classify']['confidence_floor']}).")
@@ -217,12 +256,13 @@ def cmd_classify_diff(args: argparse.Namespace) -> int:
         "repo": repo_name(repo),
         "trigger": args.trigger or "manual",
         "task": task,
-        "provider": provider,
+        "provider": effective_provider,
         "providers_used": providers_used,
         "input_chars": len(diff),
         "input_sha256": hashlib.sha256(diff.encode()).hexdigest()[:16],
         "heads": _sanitize_for_log(results),
         "overridden": overridden,
+        "risk_prior": risk_prior_info,
         "verdict": "escalated" if escalated else "pass",
         "escalated": escalated,
         "latency_ms": elapsed_ms,
@@ -918,6 +958,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print("sys1:   not importable — using inline provider code path")
         print("        (install: pip install -e ~/Projects/sys1, or set DEV_DECISIONS_SYS1_PATH)")
+
+    # sdm1 library (tabular decision lane — batch-only, hosted TabPFN)
+    from .judgment import sdm1
+    from .tabular import sdm1_ready
+
+    sdm1_ok, sdm1_reason = sdm1_ready()
+    if sdm1 is not None:
+        try:
+            sdm1_version = sdm1.__version__
+        except Exception:
+            sdm1_version = "?"
+        print(f"sdm1:   v{sdm1_version} ({sdm1_reason})")
+        try:
+            health = sdm1.health_report()
+            for pid, info in sorted(health.items()):
+                tick = "✓" if info.get("available") else "✗"
+                print(f"  {tick} {pid}: {info.get('reason', '')}")
+        except Exception as e:
+            print(f"  sdm1 health check failed: {e}")
+    else:
+        print(f"sdm1:   not importable — tabular lane unavailable ({sdm1_reason})")
 
     # config
     if CONFIG_FILE.exists():

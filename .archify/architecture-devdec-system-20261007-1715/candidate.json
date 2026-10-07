@@ -1,0 +1,344 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "dev-decisions \u2014 verification and calibration layer",
+    "subtitle": "Two decision-model lanes, one accountability machinery: gates the operations, grades the outcomes, earns autonomy on evidence",
+    "output": "system.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:adelvillar1/dev-decisions.git",
+      "revision": "ea90290f9cf0feaa727fc46dd26dc8a80ca90ff7",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "hooks",
+      "type": "external",
+      "label": "git hooks + ZCode gate",
+      "sublabel": "pre-commit \u00b7 pre-push \u00b7 PreToolUse",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "CLI (devdec)",
+      "sublabel": "20+ subcommands",
+      "sources": [
+        {
+          "path": "scripts/devdec/cli.py",
+          "line": 34,
+          "label": "build_parser"
+        }
+      ],
+      "pos": [
+        280,
+        210
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "gates",
+      "type": "backend",
+      "label": "gate family + triage",
+      "sublabel": "plan \u00b7 evidence \u00b7 docs \u00b7 arch \u00b7 ux",
+      "sources": [
+        {
+          "path": "scripts/devdec/gates.py",
+          "line": 323,
+          "label": "cmd_plan_gate"
+        }
+      ],
+      "pos": [
+        490,
+        210
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "textlane",
+      "type": "backend",
+      "label": "sys1 text lane",
+      "sublabel": "glide \u00b7 drex \u00b7 jev \u00b7 decide",
+      "sources": [
+        {
+          "path": "scripts/devdec/judgment.py",
+          "line": 41,
+          "label": "bootstrap"
+        }
+      ],
+      "pos": [
+        750,
+        80
+      ],
+      "size": [
+        150,
+        68
+      ]
+    },
+    {
+      "id": "tabular",
+      "type": "backend",
+      "label": "sdm1 tabular lane",
+      "sublabel": "tabpfn-hosted \u00b7 batch only",
+      "tag": "TABPFN_API_KEY",
+      "sources": [
+        {
+          "path": "scripts/devdec/tabular.py",
+          "line": 1,
+          "label": "tabular lane"
+        }
+      ],
+      "pos": [
+        750,
+        340
+      ],
+      "size": [
+        160,
+        68
+      ]
+    },
+    {
+      "id": "textapis",
+      "type": "cloud",
+      "label": "fastino \u00b7 typesafe",
+      "sublabel": "hosted text-model APIs",
+      "pos": [
+        980,
+        80
+      ],
+      "size": [
+        150,
+        68
+      ]
+    },
+    {
+      "id": "tabapis",
+      "type": "cloud",
+      "label": "Prior Labs TabPFN",
+      "sublabel": "hosted \u00b7 metered",
+      "pos": [
+        980,
+        340
+      ],
+      "size": [
+        150,
+        68
+      ]
+    },
+    {
+      "id": "tables",
+      "type": "database",
+      "label": "tables/",
+      "sublabel": "cached verdict CSVs",
+      "sources": [
+        {
+          "path": "scripts/devdec/tabular.py",
+          "line": 41,
+          "label": "TABLES_DIR"
+        }
+      ],
+      "pos": [
+        750,
+        480
+      ],
+      "size": [
+        150,
+        60
+      ]
+    },
+    {
+      "id": "stores",
+      "type": "database",
+      "label": "events + feedback",
+      "sublabel": "JSONL \u00b7 input_sha256 join",
+      "sources": [
+        {
+          "path": "scripts/devdec/config.py",
+          "line": 179,
+          "label": "log_record"
+        }
+      ],
+      "pos": [
+        1210,
+        210
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "calib",
+      "type": "backend",
+      "label": "disposition + calibration",
+      "sublabel": "floors \u00b7 earned autonomy",
+      "sources": [
+        {
+          "path": "scripts/devdec/gates.py",
+          "line": 1456,
+          "label": "cmd_calibration"
+        }
+      ],
+      "pos": [
+        1480,
+        210
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "tower",
+      "type": "external",
+      "label": "tower gates.html",
+      "sublabel": "surfaces, never disposes",
+      "pos": [
+        1480,
+        360
+      ],
+      "size": [
+        160,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "scripts/devdec \u2014 stdlib only",
+      "wraps": [
+        "cli",
+        "gates",
+        "textlane",
+        "tabular"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "local state \u2014 ~/.local/share",
+      "wraps": [
+        "tables",
+        "stores"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "hooks-to-cli",
+      "from": "hooks",
+      "to": "cli",
+      "label": "trigger",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-to-gates",
+      "from": "cli",
+      "to": "gates",
+      "label": "dispatch"
+    },
+    {
+      "id": "gates-to-textlane",
+      "from": "gates",
+      "to": "textlane",
+      "label": "judge text"
+    },
+    {
+      "id": "gates-to-tabular",
+      "from": "gates",
+      "to": "tabular",
+      "label": "score tables"
+    },
+    {
+      "id": "textlane-to-apis",
+      "from": "textlane",
+      "to": "textapis",
+      "label": "HTTPS"
+    },
+    {
+      "id": "tabular-to-apis",
+      "from": "tabular",
+      "to": "tabapis",
+      "label": "REST \u00b7 batch",
+      "variant": "dashed"
+    },
+    {
+      "id": "tabular-to-tables",
+      "from": "tabular",
+      "to": "tables",
+      "label": "write cached",
+      "variant": "dashed"
+    },
+    {
+      "id": "tables-to-cli",
+      "from": "tables",
+      "to": "cli",
+      "label": "risk prior \u2014 no network",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "bottom"
+    },
+    {
+      "id": "gates-to-stores",
+      "from": "gates",
+      "to": "stores",
+      "label": "verdict rows + heads"
+    },
+    {
+      "id": "stores-to-calib",
+      "from": "stores",
+      "to": "calib",
+      "label": "join + fit"
+    },
+    {
+      "id": "calib-to-tower",
+      "from": "calib",
+      "to": "tower",
+      "label": "ingest",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two lanes, one machinery",
+      "items": [
+        "sys1 lane judges what the work says: diffs, plans, logs, docs",
+        "sdm1 lane scores what the work measures: run histories, benchmarks, calibration stores",
+        "Same JSONL rows, dispositions, and per-head floors for both"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Batch-only rule",
+      "items": [
+        "Tabular model calls are minutes-scale \u2014 never inside a synchronous hook path",
+        "Pre-push reads the cached risk table: a local CSV, zero network"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Earned autonomy",
+      "items": [
+        "Advisorial by default; override rates decide when a gate may block",
+        "sdm1 component routing is eval-only: logged, never applied as labels",
+        "Declines are first-class answers \u2014 the tabular text-lane bridge declines without labeled context"
+      ]
+    }
+  ]
+}

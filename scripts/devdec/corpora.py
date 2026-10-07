@@ -624,6 +624,24 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
             "telemetry": item_telemetry,
         })
 
+    # EVAL-ONLY component routing (C8, tabular-decision-lane plan): scored via
+    # the sdm1 lane over structured issue features. Results are logged for
+    # calibration comparison and NEVER merged into labels_to_apply — the
+    # application path above reads text-lane `parsed` heads only.
+    sdm1_route_eval: dict = {}
+    if getattr(args, "sdm1_route", False):
+        from .tabular import route_via_sdm1
+
+        route_telemetry: dict = {}
+        sdm1_route_eval = route_via_sdm1(issues, cfg, telemetry=route_telemetry)
+        for item in items:
+            item["sdm1_route_eval"] = sdm1_route_eval.get(item["num"])
+            if item.get("sdm1_route_eval"):
+                print(f"  [sdm1-route EVAL-ONLY] #{item['num']} → {item['sdm1_route_eval']} (logged, not applied)")
+        if not sdm1_route_eval:
+            note = (route_telemetry.get("sdm1_route") or {}).get("skipped", "no routing produced")
+            print(f"  [sdm1-route] eval-only routing skipped: {note}")
+
     log_record({
         "op": "triage-issues",
         "repo": repo,
@@ -632,6 +650,7 @@ def cmd_triage_issues(args: argparse.Namespace) -> int:
         "provider": provider,
         "dry_run": dry_run,
         "items": items,
+        "sdm1_route_eval": sdm1_route_eval or None,
     })
     return EXIT_OK
 

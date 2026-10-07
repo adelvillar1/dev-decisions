@@ -16,7 +16,7 @@ Three deployment layers (git hooks, a global ZCode hook, and the CLI), each inde
 
 Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` is the calibration dataset.
 
-![dev-decisions architecture](docs/architecture.svg)
+[![dev-decisions architecture](docs/architecture/system.png)](docs/architecture/system.html)
 
 ## Providers
 
@@ -30,6 +30,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 | Extraction | **GLiNER2.5** (fastino hosted) | Span extraction — PII redaction for `scan-staged --deep`; a different model from Decide, different use |
 | Evaluating | **Julia** (`julia-1`, supersoniclabs) | BERT-based, systemone-shaped wire; cheapest hosted. Calibrated out of the default chain — where it fits is still being figured out |
 | Eval only (not in active roster) | **ModernBERT** | Calibration comparison, kept available |
+| Tabular decisions (batch lane) | **TabPFN-3.5 hosted** (Prior Labs, via the sdm1 library) | Calibrated classification, quantile forecasts, and anomaly bands over tables — run histories, benchmark series, the calibration stores. Batch-only: ~minutes-scale small tasks, never in a hook path |
 
 ### Candidate models (opt-in, via sys1 flags)
 
@@ -127,8 +128,12 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `docs_gate` | `docs-gate` command | Artifact coverage + staleness |
 | `arch_gate` | `arch-gate` command | Claim vs documented architecture |
 | `plan_surface_map` / `plan_deps` | `plan-surface` command | Criterion->module map / pairwise criterion order |
-
-![workflows — the gate family](docs/workflows.svg)
+| `override_prior` | `override-prior` command | Per-head override probability + suggested floor |
+| `history_flake` | `history-gate` command | Per-check flake probability from CI run history |
+| `budget_forecast` | `budget-gate` command | Forecast band for a benchmark series; out-of-band flags |
+| `commit_risk_prior` | `risk-prior` command | Per-directory revert prior (cached for the pre-push advisory) |
+| `fleet_anomaly` | `fleet-anomaly` command | Repo whose activity deviates from fleet peers |
+| `issue_component_route` | `triage-issues --sdm1-route` | Eval-only component routing from structured features |
 
 ## Contract gates
 
@@ -150,6 +155,33 @@ disposition command looks up the matched gate event (within 30 days) and
 writes per-head feedback rows — `fixed`/`waived` grade the prediction correct,
 `overridden` inverts it. Gate rows carry `input_sha256` and per-head answers
 so the pairing joins cleanly.
+
+## Tabular decision lane (sdm1 / hosted TabPFN)
+
+The sys1 lane judges what the work **says** (diffs, plans, logs, docs). The
+tabular lane scores what the work **measures** — the second model class under
+the same accountability machinery. It runs on the [sdm1](https://github.com/adelvillar1/sdm1)
+library (bootstrapped beside sys1) with Prior Labs' TabPFN-3.5 hosted API:
+stdlib HTTPS, no local stack, `TABPFN_API_KEY` from the env.
+
+**Batch-only rule:** measured small-task latency is minutes-scale, so no
+tabular command ever runs a live model call inside a synchronous hook path.
+The pre-push advisory reads the cached risk table (a local CSV, no network).
+
+| Command | What it does | Evidence source |
+|---|---|---|
+| `override-prior` | Per-head override probabilities + suggested floors for the earned-autonomy board | JSONL events x feedback store join |
+| `record-runs` | Ingest CI run/job history into `~/.local/share/dev-decisions/tables/ci_runs.csv` (idempotent) | `gh` |
+| `history-gate` | Flag intermittent checks; sdm1 ranks once graded labels exist (cold start flags mechanically) | the check table |
+| `record-bench <name> -- <cmd>` | Time a command into `bench_<name>.csv` | local run |
+| `budget-gate <name>` | Flag runs outside the sdm1 forecast band (0.1-0.9 quantiles) | the benchmark table |
+| `risk-prior` | Per-directory revert prior from git history into `risk_prior.csv` | local git log |
+| `fleet-anomaly` | Flag repos whose activity profile deviates from fleet peers (anomaly = coverage of the observed value by the forecast band) | per-repo git metrics |
+
+Routing: `[classify] by_task` can send a text task to `sdm1`; the lane
+declines when no labeled tabular context exists (declines are first-class).
+`triage-issues --sdm1-route` scores component routing EVAL-ONLY — logged for
+calibration, never applied as labels.
 
 ## UX corpus (ux-surface + ux-gate)
 
@@ -323,8 +355,6 @@ dev-decisions remove-hooks /path/to/repo
 ## How a decision flows
 
 `classify-diff`, `scan-staged`, `pr-gate`, and `fleet-scan` share one pipeline: local secret scan first, then guards, then the task registry, then provider routing, then the confidence gate. Every step is appended to the JSONL log.
-
-![decision flow](docs/decision-flow.svg)
 
 ## ZCode agent routing
 

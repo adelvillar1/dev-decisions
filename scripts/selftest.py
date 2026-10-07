@@ -339,5 +339,218 @@ class TestFeedbackRowShape(unittest.TestCase):
                 dd.LOG_DIR = old_log
 
 
+# ── tabular decision lane (2026-10-07 plan: sdm1 / hosted TabPFN) ────────────
+
+
+class TestTabularLane(unittest.TestCase):
+    """Fixture-backed tests for the six tabular surfaces (C2-C8 mechanics).
+
+    All offline: the sdm1 model call is never on this path — the tests pin
+    the pure layers (parsers, aggregation, ranking, band comparison) plus
+    the cached-table-only rule for the hook path. The lane lives in the
+    devdec package only (canonical post-split), so setUp merges its public
+    names into the under-test namespace and isolates its LOG/TABLES dirs.
+    """
+
+    def setUp(self):
+        import sys as _sys
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        td = Path(self._tmp.name)
+        scripts = str(_HERE.parent)
+        if scripts not in _sys.path:
+            _sys.path.insert(0, scripts)
+        import devdec.config as _cfg
+        import devdec.tabular as _tab
+
+        self._saved = (_cfg.LOG_DIR, _tab.TABLES_DIR, _tab.FEEDBACK_FILE)
+        _cfg.LOG_DIR = td / "logs"
+        _tab.TABLES_DIR = td / "tables"
+        _tab.FEEDBACK_FILE = td / "logs" / "feedback" / "feedback.jsonl"
+        self._tab = _tab
+        for _name in (
+            "parse_gh_runs", "parse_gh_jobs", "history_candidates", "build_override_groups",
+            "rank_override_heads", "forecast_band", "parse_git_numstat", "directory_features",
+            "risk_prior_for_paths", "load_risk_prior", "write_table", "fleet_metrics",
+            "sdm1_component_features", "route_via_sdm1", "classify_text_via_sdm1",
+            "_override_training_rows",
+        ):
+            setattr(dd, _name, getattr(_tab, _name))
+        self._td = td
+
+    def tearDown(self):
+        import devdec.config as _cfg
+        import devdec.tabular as _tab
+
+        _cfg.LOG_DIR, _tab.TABLES_DIR, _tab.FEEDBACK_FILE = self._saved
+        self._tmp.cleanup()
+
+    # C3: gh output parser
+    def test_parse_gh_runs_normalizes_and_skips_bad(self):
+        raw = json.dumps([
+            {"databaseId": 123, "workflowName": "ci", "conclusion": "success",
+             "event": "push", "headBranch": "main", "createdAt": "2026-10-07T00:00:00Z"},
+            {"databaseId": None},  # no id → dropped
+            "junk",  # wrong shape tolerated
+        ])
+        rows = dd.parse_gh_runs(raw, "o/r")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["repo"], "o/r")
+        self.assertEqual(rows[0]["check_name"], "ci")
+        self.assertEqual(rows[0]["run_id"], "123")
+        self.assertEqual(dd.parse_gh_runs("not json", "o/r"), [])
+
+    # C4: intermittent/stable mechanics
+    def test_history_candidates_flags_only_intermittent(self):
+        rows = []
+        for i in range(6):
+            rows.append({"repo": "r", "check_name": "flaky", "conclusion": "failure" if i % 2 else "success"})
+            rows.append({"repo": "r", "check_name": "green", "conclusion": "success"})
+            rows.append({"repo": "r", "check_name": "broken", "conclusion": "failure"})
+            rows.append({"repo": "r", "check_name": "skipped_thing", "conclusion": "skipped"})
+        cands = dd.history_candidates(rows, min_runs=5)
+        by_name = {c["check_name"]: c for c in cands}
+        self.assertTrue(by_name["flaky"]["intermittent"])
+        self.assertAlmostEqual(by_name["flaky"]["fail_rate"], 0.5)
+        self.assertFalse(by_name["green"]["intermittent"])
+        self.assertFalse(by_name["broken"]["intermittent"])
+        self.assertNotIn("skipped_thing", by_name)  # skipped excluded from the denominator
+
+    # C2: planted 100%-overridden head ranks first (feedback x event join)
+    def test_override_ranking_planted_head_first(self):
+        events = [
+            {"op": "pr-gate", "input_sha256": "sha1",
+             "heads": {"jev": {"risky": {"label": "yes", "confidence": 0.8}}}},
+            {"op": "pr-gate", "input_sha256": "sha2",
+             "heads": {"jev": {"kind": {"label": "bug", "confidence": 0.9}}}},
+        ]
+        feedback = [
+            {"input_sha256": "sha1", "task": "pr_gate", "head_id": "risky",
+             "provider": "jev", "label": "no"},  # predicted yes, actual no → override
+            {"input_sha256": "sha2", "task": "pr_gate", "head_id": "kind",
+             "provider": "jev", "label": "bug"},  # predicted bug, actual bug → upheld
+        ]
+        # planted head joins five overridden rows (five events, one sha each)
+        for i in range(4):
+            events.append({"op": "pr-gate", "input_sha256": f"sha1_{i}",
+                           "heads": {"jev": {"risky": {"label": "yes", "confidence": 0.8}}}})
+            feedback.append({"input_sha256": f"sha1_{i}", "task": "pr_gate", "head_id": "risky",
+                             "provider": "jev", "label": "no"})
+        training = dd._override_training_rows(feedback, events)
+        self.assertEqual(len(training), 6)
+        groups = dd.build_override_groups(training)
+        self.assertEqual(groups[("pr_gate", "risky", "jev")]["overrides"], 5)
+        ranked = dd.rank_override_heads(sorted(groups.keys()), groups, {}, model_used=False)
+        self.assertEqual(ranked[0]["head_id"], "risky")
+        self.assertEqual(ranked[0]["observed_override_rate"], 1.0)
+        self.assertEqual(ranked[0]["suggested_floor"], 0.9)  # never safe below 0.9 at rate 1.0
+        self.assertEqual(ranked[-1]["head_id"], "kind")
+        self.assertEqual(ranked[-1]["suggested_floor"], 0.5)
+
+    # C5: forecast band guard (no model call on short series)
+    def test_forecast_band_short_series_declines(self):
+        out = dd.forecast_band([1.0, 2.0, 3.0])
+        self.assertFalse(out["ok"])
+        self.assertIn("too short", out["error"])
+
+    # C6: pure git-log parsing + directory features
+    def test_parse_git_numstat_and_directory_features(self):
+        log = (
+            "\x1eRevert \"add login\"\x1fabc\n"
+            "3\t1\tsrc/auth/login.py\n"
+            "\x1efix typo\x1fdef\n"
+            "1\t0\tdocs/readme.md\n"
+        )
+        commits = dd.parse_git_numstat(log)
+        self.assertEqual(len(commits), 2)
+        self.assertTrue(commits[0]["reverted"])
+        feats = dd.directory_features(commits)
+        self.assertEqual(feats["src/auth"]["reverted_touches"], 1)
+        self.assertEqual(feats["src/auth"]["churn_lines"], 4)
+        self.assertEqual(feats["docs"]["churn_lines"], 1)
+
+    def test_risk_prior_for_paths_ancestry_and_no_network(self):
+        import socket
+
+        def _no_network(*a, **k):
+            raise AssertionError("network call attempted in the hook path")
+
+        real = socket.socket
+        socket.socket = _no_network
+        try:
+            priors = {"src": 0.7, "src/auth": 0.9, "docs": 0.1}
+            hit = dd.risk_prior_for_paths(priors, ["src/auth/login.py"])
+            self.assertEqual(hit["dir"], "src/auth")
+            self.assertEqual(hit["prior"], 0.9)
+            deep = dd.risk_prior_for_paths(priors, ["src/auth/deep/x.py"])
+            self.assertEqual(deep["prior"], 0.9)  # walks ancestry up to src/auth
+            miss = dd.risk_prior_for_paths(priors, ["other/x.py"])
+            self.assertIsNone(miss["dir"])
+        finally:
+            socket.socket = real
+
+    # C7: planted outlier → exactly one flag (coverage mechanics from sdm1's parser)
+    def test_fleet_fixture_outlier_flags_one(self):
+        class FakePred:
+            def __init__(self, row_index, label, confidence):
+                self.row_index, self.label, self.confidence = row_index, label, confidence
+                self.extras = {"actual": 100}
+
+        preds = [FakePred(0, "normal", 0.8), FakePred(1, "normal", 0.8), FakePred(2, "anomaly", 0.0)]
+        metrics = [{"repo": f"r{i}"} for i in range(3)]
+        flags = [metrics[p.row_index]["repo"] for p in preds if p.label == "anomaly"]
+        self.assertEqual(flags, ["r2"])
+
+    # C8: structured features are text-free; thin context declines routing
+    def test_component_features_no_raw_text(self):
+        feats = dd.sdm1_component_features({
+            "number": 1, "title": "secret title words", "body": "secret body words",
+            "labels": [{"name": "area/api"}, {"name": "bug"}],
+            "createdAt": "2026-10-01T00:00:00Z",
+        })
+        dumped = json.dumps(feats)
+        self.assertNotIn("secret", dumped)
+        self.assertEqual(feats["component_label"], "area/api")
+        self.assertEqual(feats["n_labels"], 2)
+
+    def test_route_via_sdm1_declines_on_thin_context(self):
+        issues = [
+            {"number": 1, "title": "t1", "body": "", "labels": [{"name": "bug"}], "createdAt": ""},
+            {"number": 2, "title": "t2", "body": "", "labels": [{"name": "bug"}], "createdAt": ""},
+            {"number": 3, "title": "t3", "body": "", "labels": [{"name": "bug"}], "createdAt": ""},
+            {"number": 4, "title": "t4", "body": "", "labels": [{"name": "bug"}], "createdAt": ""},
+        ]
+        routed = dd.route_via_sdm1(issues, {})
+        self.assertEqual(routed, {})  # zero labeled component context → decline
+
+    # C1: the text-lane bridge always declines (declines are first-class)
+    def test_classify_text_via_sdm1_declines(self):
+        outcome = dd.classify_text_via_sdm1("safety", "rm -rf /tmp/x", {})
+        self.assertEqual(outcome["results"], {})
+        self.assertEqual(outcome["providers_used"], ["sdm1"])
+        self.assertTrue(outcome["telemetry"]["sdm1"]["declined"])
+        self.assertTrue(outcome["escalated"])
+
+    # batch-only rule: the cached-table helpers never touch the network
+    def test_load_risk_prior_reads_table_only(self):
+        import socket
+
+        def _no_network(*a, **k):
+            raise AssertionError("network call in cached-table read")
+
+        real = socket.socket
+        socket.socket = _no_network
+        try:
+            self._tab.write_table(self._td / "tables" / "risk_prior.csv",
+                                  ["dir", "commits", "churn_lines", "revert_prior", "confidence"],
+                                  [{"dir": "src", "commits": 5, "churn_lines": 10,
+                                    "revert_prior": 0.5, "confidence": 0.8}])
+            priors = self._tab.load_risk_prior(self._td / "tables" / "risk_prior.csv")
+            self.assertEqual(priors, {"src": 0.5})
+        finally:
+            socket.socket = real
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

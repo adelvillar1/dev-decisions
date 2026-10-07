@@ -387,3 +387,34 @@ After a few weeks, the JSONL log contains (input, model, confidence, human-outco
 ## License
 
 Apache-2.0
+
+---
+
+## Tabular decision lane (sdm1 / hosted TabPFN)
+
+The second model class: where sys1 judges text, the sdm1 lane scores tables
+(CI run histories, benchmark series, the calibration stores, git-history
+features, fleet metrics). Same JSONL, same disposition/calibration loop.
+
+- **Provider**: the `sdm1` library (bootstrapped beside sys1:
+  `~/Projects/sdm1/src` or `DEV_DECISIONS_SDM1_PATH`), backend
+  `tabpfn-hosted` (Prior Labs API, `TABPFN_API_KEY` env).
+- **Batch-only rule**: tabular model calls are minutes-scale. They never run
+  inside pre-commit/pre-push/ZCode-gate synchronous paths; hooks read cached
+  tables under `~/.local/share/dev-decisions/tables/`.
+- **Commands**: `override-prior` (per-head override probabilities + suggested
+  floors, from the events x feedback join), `record-runs` (gh CI history into
+  `tables/ci_runs.csv`, idempotent; `--jobs` for check-level rows),
+  `history-gate` (flag intermittent checks; mechanical on cold start, sdm1-
+  ranked once >= 3 graded rows exist), `record-bench <name> -- <cmd>` +
+  `budget-gate <name>` (forecast band, out-of-band flags), `risk-prior`
+  (per-directory revert prior; consumed by `classify-diff --with-risk-prior`
+  from the cached CSV only), `fleet-anomaly` (repo activity vs fleet peers).
+- **Routing**: `[classify] by_task` accepts `sdm1`; the bridge declines when
+  no labeled context exists (declines are first-class, the row still logs).
+- **Eval-only head**: `triage-issues --sdm1-route` logs component routing
+  from structured issue features — never applied as labels until a
+  calibration floor is met (the ModernBERT policy).
+- **Anomaly semantics**: confidence = distribution coverage (fraction of the
+  forecast band containing the observed value); floor 0.6 means the 0.2-0.8
+  band must contain it.
