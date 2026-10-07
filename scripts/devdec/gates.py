@@ -1650,6 +1650,12 @@ _GATE_OP_TARGET_FIELD = {
     "ux-gate": ("ux-gate", "target"),
     "zcode-gate": ("zcode-gate", "command"),
     "judge": ("judge", "task"),
+    # tabular lane gates (2026-10-07 plan): target = table path / bench name / fleet
+    "history-gate": ("history-gate", "target"),
+    "budget-gate": ("budget-gate", "target"),
+    "fleet-anomaly": ("fleet-anomaly", "target"),
+    "override-prior": ("override-prior", "target"),
+    "risk-prior": ("risk-prior", "target"),
 }
 
 

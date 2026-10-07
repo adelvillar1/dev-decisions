@@ -25,6 +25,7 @@ from typing import Callable
 from .workflow import cmd_bulk_install, cmd_classify_diff, cmd_config, cmd_doctor, cmd_fleet_scan, cmd_install_hooks, cmd_log, cmd_remove_hooks, cmd_scan_staged, cmd_status, cmd_zcode_gate
 from .gates import cmd_arch_gate, cmd_calibration, cmd_disposition, cmd_docs_gate, cmd_evidence_gate, cmd_feedback, cmd_judge, cmd_plan_gate, cmd_plan_reconcile, cmd_plan_surface, cmd_pr_gate
 from .corpora import cmd_changelog, cmd_triage_issues, cmd_uc_gate, cmd_ux_gate, cmd_ux_surface
+from .tabular import cmd_budget_gate, cmd_fleet_anomaly, cmd_history_gate, cmd_override_prior, cmd_record_bench, cmd_record_runs, cmd_risk_prior
 from .dashboard import cmd_dashboard
 from .config import DEFAULT_MAX_DIFF_CHARS, EXIT_OK, VERSION
 from .judgment import PROVIDER_CHOICES
@@ -54,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Task to run: change, commit_audit, deps_risk, docs_drift, api_drift (default: auto-detect from diff)")
     sp.add_argument("--allow-vendor", action="store_true",
                     help="Allow vendor calls even if repo is sensitive")
+    sp.add_argument("--with-risk-prior", action="store_true",
+                    help="Compose the cached risk-prior table into the advisory (batch-only: reads a local CSV, never calls the model)")
     sp.add_argument("--trigger", default="manual", help="Log this trigger label")
     sp.set_defaults(func=cmd_classify_diff)
 
@@ -217,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=10, help="Max issues to classify")
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider (local recommended)")
+    sp.add_argument("--sdm1-route", action="store_true",
+                    help="EVAL-ONLY: also score component routing via the sdm1 tabular lane (logged, never applied as labels)")
     sp.add_argument("--dry-run", action="store_true", help="Print labels without applying them (default)")
     sp.set_defaults(func=cmd_triage_issues)
 
@@ -278,6 +283,57 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--days", type=int, default=7, help="Lookback window in days (default: 7)")
     sp.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
     sp.set_defaults(func=cmd_dashboard)
+
+    # ── tabular decision lane (sdm1 / hosted TabPFN — batch commands only) ──
+
+    sp = sub.add_parser("override-prior",
+                        help="Per-head override probabilities + suggested floors from the graded stores (sdm1)")
+    sp.add_argument("--top", type=int, default=20, help="Heads to print (default 20)")
+    sp.add_argument("--json", action="store_true", help="Emit full ranked JSON")
+    sp.set_defaults(func=cmd_override_prior)
+
+    sp = sub.add_parser("record-runs",
+                        help="Ingest CI run/job history into the check table (gh; idempotent)")
+    sp.add_argument("--repos", default=None, help="Comma-separated owner/repo list (default: current repo)")
+    sp.add_argument("--limit", type=int, default=30, help="Runs per repo (default 30)")
+    sp.add_argument("--jobs", action="store_true", help="Also fetch per-job conclusions (check-level flake data)")
+    sp.add_argument("--job-runs", type=int, default=15, help="Runs to expand to jobs per repo (default 15)")
+    sp.set_defaults(func=cmd_record_runs)
+
+    sp = sub.add_parser("history-gate",
+                        help="Flag intermittent checks from the recorded CI table (sdm1-ranked when graded labels exist)")
+    sp.add_argument("--table", default=None, help="Check table path (default: ~/.local/share/dev-decisions/tables/ci_runs.csv)")
+    sp.add_argument("--repo", default=None, help="Scope to one repo")
+    sp.add_argument("--min-runs", type=int, default=5, help="Runs required per check (default 5)")
+    sp.add_argument("--min-labels", type=int, default=3, help="Graded rows required before sdm1 scores (default 3)")
+    sp.add_argument("--floor", type=float, default=None, help="Flake-probability floor (default: sdm1 interpret default)")
+    sp.add_argument("--show-stable", action="store_true", help="Also print stable checks")
+    sp.set_defaults(func=cmd_history_gate)
+
+    sp = sub.add_parser("record-bench",
+                        help="Time one command and append a row to its benchmark table")
+    sp.add_argument("name", help="Benchmark name (table: bench_<name>.csv)")
+    sp.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to time (after the name)")
+    sp.set_defaults(func=cmd_record_bench)
+
+    sp = sub.add_parser("budget-gate",
+                        help="Flag benchmark runs outside the sdm1 forecast band")
+    sp.add_argument("name", help="Benchmark name (table: bench_<name>.csv)")
+    sp.add_argument("--ahead", type=int, default=1, help="How many trailing runs to check (default 1)")
+    sp.set_defaults(func=cmd_budget_gate)
+
+    sp = sub.add_parser("risk-prior",
+                        help="Score per-directory revert risk from git history into the cached table")
+    sp.add_argument("--repo", default=None, help="Repo root (default: cwd)")
+    sp.add_argument("--since", default=None, help="Git --since window (default: all history)")
+    sp.set_defaults(func=cmd_risk_prior)
+
+    sp = sub.add_parser("fleet-anomaly",
+                        help="Flag repos whose activity profile deviates from fleet peers (sdm1 anomaly)")
+    sp.add_argument("--root", default=None, help="Fleet root (default: ~/Projects)")
+    sp.add_argument("--all-query", action="store_true", help="Score every repo as a query row (default: latest only)")
+    sp.add_argument("--floor", type=float, default=0.6, help="Coverage floor below which a repo flags (default 0.6)")
+    sp.set_defaults(func=cmd_fleet_anomaly)
 
     # config
     sp = sub.add_parser("config", help="Show effective config")

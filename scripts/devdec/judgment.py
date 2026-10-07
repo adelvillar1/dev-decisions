@@ -77,11 +77,50 @@ try:
 except Exception:  # sys1 too old for the plansurface module
     _plansurface = None
 
+
+def _bootstrap_sdm1():
+    """Sibling bootstrap for the sdm1 tabular-decision library (sdm1 mirrors
+    sys1's layout, so the same search works): env path, ~/Projects/sdm1/src,
+    then sibling sdm1/src under the script's parents."""
+    try:
+        import sdm1  # type: ignore[import-not-found]
+        return sdm1
+    except ImportError:
+        pass
+    candidates: list[Path] = []
+    env = os.environ.get("DEV_DECISIONS_SDM1_PATH")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.append(Path.home() / "Projects" / "sdm1" / "src")
+    here = Path(__file__).resolve()
+    for parent in here.parents[:4]:
+        candidates.append(parent / "sdm1" / "src")
+    for cand in candidates:
+        s = str(cand)
+        if not cand.is_dir():
+            continue
+        if s not in sys.path:
+            sys.path.insert(0, s)
+        try:
+            import sdm1  # type: ignore[import-not-found]
+            return sdm1
+        except ImportError:
+            try:
+                sys.path.remove(s)
+            except ValueError:
+                pass
+            continue
+    return None
+
+
+sdm1 = _bootstrap_sdm1()
+
 # --provider choices: dynamic from the sys1 registry, so candidate models
 # (clm, kev, tev1, decide_1b, ...) show up as soon as sys1 registers them —
-# plus the fan-out aliases. Falls back to the four core ids when sys1 isn't
-# installed (self-contained mode).
-_FALLBACK_PROVIDER_IDS = ["decide", "jev", "local", "modernbert"]
+# plus the fan-out aliases and the sdm1 tabular lane (a dev-decisions-level
+# id: routes to the sdm1 library's tabpfn-hosted backend, not sys1's registry).
+# Falls back to the core ids when sys1 isn't installed (self-contained mode).
+_FALLBACK_PROVIDER_IDS = ["decide", "jev", "local", "modernbert", "sdm1"]
 _PROVIDER_ALIASES = ["both", "all", "core", "optin", "candidates", "auto"]
 
 
@@ -89,7 +128,7 @@ def _provider_choices() -> list[str]:
     if sys1 is None:
         return _FALLBACK_PROVIDER_IDS + ["both"]
     try:
-        return sorted(sys1.REGISTRY) + _PROVIDER_ALIASES
+        return sorted(sys1.REGISTRY) + _PROVIDER_ALIASES + ["sdm1"]
     except Exception:
         return _FALLBACK_PROVIDER_IDS + ["both"]
 
