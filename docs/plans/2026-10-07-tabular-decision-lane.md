@@ -1,5 +1,5 @@
 ---
-status: active
+status: completed
 created: 2026-10-07
 updated: 2026-10-07
 slug: tabular-decision-lane
@@ -36,31 +36,33 @@ High-level steps:
 
 ## Use cases
 
-- [ ] A: As a maintainer I want per-test flake probabilities computed from CI run history so that pre-push advisories can name likely-flaky tests instead of only judging diff text.
-- [ ] B: As a maintainer I want benchmark metrics scored against a forecast band so that a change that regresses latency or size is flagged even when no baseline file is maintained by hand.
-- [ ] C: As the owner of the calibration loop I want override probabilities and fitted floors predicted from the accumulated JSONL + feedback tables so the earned-autonomy board carries a learned prior instead of raw 20-case counts alone.
-- [ ] D: As a committer I want a per-directory risk prior from git history composed into the pre-push advisory so numeric history evidence accompanies the text verdict, without adding any network call to the hook.
-- [ ] E: As a fleet owner I want zero-shot anomaly flags over repo metric tables surfaced in the tower inbox so metric regressions appear without hand-maintained thresholds.
-- [ ] F: As a triage user I want issues routed to components from structured features as an eval-only head so routing quality can be measured against accruing labels before it is trusted.
+- [x] A: As a maintainer I want per-test flake probabilities computed from CI run history so that pre-push advisories can name likely-flaky tests instead of only judging diff text.
+- [x] B: As a maintainer I want benchmark metrics scored against a forecast band so that a change that regresses latency or size is flagged even when no baseline file is maintained by hand.
+- [x] C: As the owner of the calibration loop I want override probabilities and fitted floors predicted from the accumulated JSONL + feedback tables so the earned-autonomy board carries a learned prior instead of raw 20-case counts alone.
+- [x] D: As a committer I want a per-directory risk prior from git history composed into the pre-push advisory so numeric history evidence accompanies the text verdict, without adding any network call to the hook.
+- [x] E: As a fleet owner I want zero-shot anomaly flags over repo metric tables surfaced in the tower inbox so metric regressions appear without hand-maintained thresholds.
+- [x] F: As a triage user I want issues routed to components from structured features as an eval-only head so routing quality can be measured against accruing labels before it is trusted.
 
 ## UX routes
 
 None — no `docs/ux/` route contracts exist in this repo and no rendered-app UI changes are in scope; tower `gates.html` surfaces the new gate rows through the existing gate-event ingestion (no route contract change).
 
 ## Acceptance criteria
+*Closed 2026-10-07 against the record: the lane's six verbs all ship (history-gate, budget-gate, override-prior, risk-prior + classify-diff --with-risk-prior, fleet-anomaly, triage-issues --sdm1-route), the sdm1 memory records the wave landed with suites green, and the kit's tabular wave consumed six of the verbs behind the tabular grant (quota-forecast, flake-watch, calibrate-floors, risk double-gate, triage eval, fleet-watch). Residue recorded: the kit's planted-positive C6 probe is executed in the kit repo, and `kit apply` + service restart there remains the named operator step.*
+
 
 Order is identity: C0, C1, … in checkbox order; evidence-gate, plan-reconcile, and surfaces key on this order.
 
-- [ ] C0: `sdm1.classify()` with the `tabpfn-hosted` provider completes an in-memory classification task end-to-end using only stdlib imports, raises `ProviderUnavailableError` naming `TABPFN_API_KEY` when unset, and its telemetry records carry `billing_model_version`, `execution_mode`, and `cache_outcome` keys with no dataset cell values and no key values (redaction test proves both).
-- [ ] C1: dev-decisions discovers sdm1 through a bootstrap sibling to the sys1 one, `dev-decisions doctor` prints an sdm1 availability row, a `by_task` override of `safety = "sdm1"` routes that task to sdm1 in a `--dry-run` invocation, and the resulting JSONL row carries provider `sdm1` with the sdm1 telemetry dict.
-- [ ] C2: `dev-decisions override-prior` scores the local JSONL + feedback stores via sdm1 and prints per-head override probabilities plus suggested floors, and a fixture test with a synthetic log ranks a planted 100%-overridden head first.
-- [ ] C3: `dev-decisions record-runs` writes per-repo CI history CSV tables under `~/.local/share/dev-decisions/tables/` from `gh`, a second identical run adds zero duplicate rows, and the `gh` output parser is unit-tested against a captured fixture file.
-- [ ] C4: `dev-decisions history-gate` scores recorded tables and exits 1 with a flag for a fixture table containing a planted intermittent-failure test while a stable-fixture run exits 0, and both runs append gate rows carrying `input_sha256` that `dev-decisions disposition history-gate <target>` can find and pair.
-- [ ] C5: `dev-decisions record-bench` appends a timing row per invocation and `dev-decisions budget-gate` flags a fixture series whose latest value falls outside the sdm1 forecast band while passing an in-band fixture, using the sdm1 `forecast` task type added in this work.
-- [ ] C6: `dev-decisions risk-prior` writes a per-directory risk table from git-history features, and the pre-push hook path consumes only that cached table — a test asserting zero outbound network calls during `classify-diff --with-risk-prior` passes.
-- [ ] C7: `dev-decisions fleet-anomaly` scores a metric table via the sdm1 `anomaly` task type and appends gate rows for flagged repos, and a fixture table with a planted outlier produces exactly that repo's flag.
-- [ ] C8: `triage-issues --provider auto` runs the sdm1 component-routing head in eval-only mode: its predictions appear in the JSONL under a filterable tag, no labels are applied to issues from it, and a unit test proves the label-application path is not reachable from the sdm1 head.
-- [ ] C9: Both repos' README state the tabular lane and its batch-only rule, SKILL.md documents the new commands, `config.example.toml` carries the sdm1 provider block and by_task examples, sdm1's TECHNICAL-DOCUMENTATION (§4–§7), FUNCTIONAL-SPECIFICATIONS (§2–§3, §7), and architecture overview match the shipped provider, and the archify diagrams in both repos (`docs/architecture/system.drawio` → rebuilt `system.svg`, including committing sdm1's untracked diagrams) render the new lane, pass XML validation, and pass a visual-judge review of rendered PNGs.
+- [x] C0: `sdm1.classify()` with the `tabpfn-hosted` provider completes an in-memory classification task end-to-end using only stdlib imports, raises `ProviderUnavailableError` naming `TABPFN_API_KEY` when unset, and its telemetry records carry `billing_model_version`, `execution_mode`, and `cache_outcome` keys with no dataset cell values and no key values (redaction test proves both).
+- [x] C1: dev-decisions discovers sdm1 through a bootstrap sibling to the sys1 one, `dev-decisions doctor` prints an sdm1 availability row, a `by_task` override of `safety = "sdm1"` routes that task to sdm1 in a `--dry-run` invocation, and the resulting JSONL row carries provider `sdm1` with the sdm1 telemetry dict.
+- [x] C2: `dev-decisions override-prior` scores the local JSONL + feedback stores via sdm1 and prints per-head override probabilities plus suggested floors, and a fixture test with a synthetic log ranks a planted 100%-overridden head first.
+- [x] C3: `dev-decisions record-runs` writes per-repo CI history CSV tables under `~/.local/share/dev-decisions/tables/` from `gh`, a second identical run adds zero duplicate rows, and the `gh` output parser is unit-tested against a captured fixture file.
+- [x] C4: `dev-decisions history-gate` scores recorded tables and exits 1 with a flag for a fixture table containing a planted intermittent-failure test while a stable-fixture run exits 0, and both runs append gate rows carrying `input_sha256` that `dev-decisions disposition history-gate <target>` can find and pair.
+- [x] C5: `dev-decisions record-bench` appends a timing row per invocation and `dev-decisions budget-gate` flags a fixture series whose latest value falls outside the sdm1 forecast band while passing an in-band fixture, using the sdm1 `forecast` task type added in this work.
+- [x] C6: `dev-decisions risk-prior` writes a per-directory risk table from git-history features, and the pre-push hook path consumes only that cached table — a test asserting zero outbound network calls during `classify-diff --with-risk-prior` passes.
+- [x] C7: `dev-decisions fleet-anomaly` scores a metric table via the sdm1 `anomaly` task type and appends gate rows for flagged repos, and a fixture table with a planted outlier produces exactly that repo's flag.
+- [x] C8: `triage-issues --provider auto` runs the sdm1 component-routing head in eval-only mode: its predictions appear in the JSONL under a filterable tag, no labels are applied to issues from it, and a unit test proves the label-application path is not reachable from the sdm1 head.
+- [x] C9: Both repos' README state the tabular lane and its batch-only rule, SKILL.md documents the new commands, `config.example.toml` carries the sdm1 provider block and by_task examples, sdm1's TECHNICAL-DOCUMENTATION (§4–§7), FUNCTIONAL-SPECIFICATIONS (§2–§3, §7), and architecture overview match the shipped provider, and the archify diagrams in both repos (`docs/architecture/system.drawio` → rebuilt `system.svg`, including committing sdm1's untracked diagrams) render the new lane, pass XML validation, and pass a visual-judge review of rendered PNGs.
 
 ## Files to be touched
 

@@ -36,10 +36,10 @@ High-level steps:
 
 ## Use cases
 
-- [ ] A: As the owner of the calibration loop I want near-dupe inputs in the JSONL store surfaced with their graded labels side by side, so graded history stopped being orphaned by exact-hash joins.
-- [ ] B: As a committer I want the nearest graded neighbors of a new diff or plan retrieved with their labels and dispositions, so every new decision inherits its measured context instead of re-deriving it.
-- [ ] C: As a gate operator I want docs-gate's claim-vs-doc fan-out to judge a retrieved shortlist instead of every pairing, so the gate's token cost drops without changing its verdicts on fixtures.
-- [ ] D: As a capture-kit operator I want sem1's st-worker provider to embed rendered-artifact images into a deterministic vector store (same render re-embeds at 1.0000 cosine), so the drift pre-filter integration that follows this plan can skip visual re-checks off that stored signal.
+- [x] A: As the owner of the calibration loop I want near-dupe inputs in the JSONL store surfaced with their graded labels side by side, so graded history stopped being orphaned by exact-hash joins.
+- [x] B: As a committer I want the nearest graded neighbors of a new diff or plan retrieved with their labels and dispositions, so every new decision inherits its measured context instead of re-deriving it.
+- [x] C: As a gate operator I want docs-gate's claim-vs-doc fan-out to judge a retrieved shortlist instead of every pairing, so the gate's token cost drops without changing its verdicts on fixtures.
+- [x] D: As a capture-kit operator I want sem1's st-worker provider to embed rendered-artifact images into a deterministic vector store (same render re-embeds at 1.0000 cosine), so the drift pre-filter integration that follows this plan can skip visual re-checks off that stored signal.
 - [ ] E: As an sdm1 user I want embedded text fields (issue titles, check names) available as feature columns so tabular surfaces stop treating free text as high-cardinality categoricals (eval-only in this phase).
 - [ ] F: As a maintainer I want fuzzy near-duplicate joins for override-prior reported eval-only, so renamed flaky tests and reworded inputs become visible without changing the exact-sha ground-truth join.
 
@@ -48,19 +48,21 @@ High-level steps:
 None — no `docs/ux/` route contracts exist in this repo and no rendered-app UI changes are in scope; the tower consumes the new JSONL rows and vector manifests through existing ingestion (no route contract change).
 
 ## Acceptance criteria
+*Delivered 2026-10-07: A–D and C0–C9 verified — v0.1.0 (19 selftests green, run again 2026-10-07), the live mirror battery, 4-decimal provider parity (C3), bit-exact store roundtrip (C4), the real calibration index at 26 vectors with the planted-pair dedup and NN fixture tests (C5/C6), docs-gate --via-semantic eval-only with the cannot-block and socket-guard tests (C7/C8), and the docs+diagram set (C9). D's consumer landed the same day: the kit's render-watch indexes renders via st-worker and reads the 1.0000 re-embed. E and F remain the lane's open work — embedded text fields as sdm1 feature columns, and the eval-only fuzzy join into override-prior.*
+
 
 Order is identity: C0, C1, … in checkbox order; evidence-gate, plan-reconcile, and surfaces key on this order.
 
-- [ ] C0: `sem1.embed()` through the `llama-server` provider completes a text batch end-to-end using only stdlib imports, raises `ProviderUnavailableError` naming the env var when the endpoint is unreachable, and its telemetry rows carry dims/latency/provider with no input text and no key values (redaction test proves both).
-- [ ] C1: `sem1 probe` against the HTTP provider reports text-only with the observed dims, and an image request against it raises `ProviderCapabilityError` instead of returning a vector — the 2026-10-07 silent text-of-base64 failure is impossible by construction (unit test proves the raise).
-- [ ] C2: `sem1.embed()` through the `st-worker` provider returns 768-dim vectors for text and for an image file, and the live mirror battery passes in the expected direction: each solid-color image is closer to its own color text from both sides and the gradient prefers the gradient text.
-- [ ] C3: the same five sanity texts embedded via `llama-server` and via `st-worker` agree on ordering (auth pair cosine > auth/cake cosine on both) and on cosine value within 0.01, proving the two providers serve the same model behavior.
-- [ ] C4: the packed-vector store roundtrips vectors bit-exactly (`array('f')` bytes equality), the manifest records model/dims/count/per-row sha256s, and a second rebuild over the same corpus writes zero duplicate entries.
-- [ ] C5: `dev-decisions semantic-index` builds the vector index over the real calibration stores (every JSONL row with extractable text gets a vector), and on a fixture containing two near-identical inputs with different sha256s, `dev-decisions semantic-dedup` reports that pair while exact-sha join code paths are untouched.
-- [ ] C6: `dev-decisions semantic-nn` on a fixture target returns the planted graded row first and prints that row's label and disposition-pairing fields in the output.
-- [ ] C7: `dev-decisions docs-gate --via-semantic` on a fixture runs eval-only: its JSONL rows carry the `sem1_raw` tag and the logged shortlist, its gate verdict equals the baseline verdict from the same fixture without the flag, and a unit test proves no label-applying or blocking path is reachable from the semantic shortlist.
-- [ ] C8: a socket-guard test proves only `sem1`/`semantic-*` code paths open embedding endpoints, and `grep` over the hook paths (scan-staged, classify-diff, zcode-gate) shows no sem1 references — hooks are byte-identical to before this work.
-- [ ] C9: sem1 ships with README, TECHNICAL-DOCUMENTATION.md (§1–§7 skeleton including the wire-tell and capability-probe contract), and an archify `docs/architecture/system.{candidate.json,html,png}` that passes XML validation and a visual-judge review of rendered PNGs; dev-decisions README/SKILL.md/config.example.toml document the lane, the `sem1_raw` tag, and the batch-only rule; recaps are drafted in both repos at completion.
+- [x] C0: `sem1.embed()` through the `llama-server` provider completes a text batch end-to-end using only stdlib imports, raises `ProviderUnavailableError` naming the env var when the endpoint is unreachable, and its telemetry rows carry dims/latency/provider with no input text and no key values (redaction test proves both).
+- [x] C1: `sem1 probe` against the HTTP provider reports text-only with the observed dims, and an image request against it raises `ProviderCapabilityError` instead of returning a vector — the 2026-10-07 silent text-of-base64 failure is impossible by construction (unit test proves the raise).
+- [x] C2: `sem1.embed()` through the `st-worker` provider returns 768-dim vectors for text and for an image file, and the live mirror battery passes in the expected direction: each solid-color image is closer to its own color text from both sides and the gradient prefers the gradient text.
+- [x] C3: the same five sanity texts embedded via `llama-server` and via `st-worker` agree on ordering (auth pair cosine > auth/cake cosine on both) and on cosine value within 0.01, proving the two providers serve the same model behavior.
+- [x] C4: the packed-vector store roundtrips vectors bit-exactly (`array('f')` bytes equality), the manifest records model/dims/count/per-row sha256s, and a second rebuild over the same corpus writes zero duplicate entries.
+- [x] C5: `dev-decisions semantic-index` builds the vector index over the real calibration stores (every JSONL row with extractable text gets a vector), and on a fixture containing two near-identical inputs with different sha256s, `dev-decisions semantic-dedup` reports that pair while exact-sha join code paths are untouched.
+- [x] C6: `dev-decisions semantic-nn` on a fixture target returns the planted graded row first and prints that row's label and disposition-pairing fields in the output.
+- [x] C7: `dev-decisions docs-gate --via-semantic` on a fixture runs eval-only: its JSONL rows carry the `sem1_raw` tag and the logged shortlist, its gate verdict equals the baseline verdict from the same fixture without the flag, and a unit test proves no label-applying or blocking path is reachable from the semantic shortlist.
+- [x] C8: a socket-guard test proves only `sem1`/`semantic-*` code paths open embedding endpoints, and `grep` over the hook paths (scan-staged, classify-diff, zcode-gate) shows no sem1 references — hooks are byte-identical to before this work.
+- [x] C9: sem1 ships with README, TECHNICAL-DOCUMENTATION.md (§1–§7 skeleton including the wire-tell and capability-probe contract), and an archify `docs/architecture/system.{candidate.json,html,png}` that passes XML validation and a visual-judge review of rendered PNGs; dev-decisions README/SKILL.md/config.example.toml document the lane, the `sem1_raw` tag, and the batch-only rule; recaps are drafted in both repos at completion.
 
 ## Files to be touched
 
