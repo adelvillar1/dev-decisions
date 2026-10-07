@@ -966,6 +966,40 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
     doc_rels = [rel for rel, _ in artifacts if rel in doc_sections]
     doc_missing = sorted(doc_missing)
 
+    # EVAL-ONLY semantic shortlist (--via-semantic): per artifact, keep only
+    # the k doc sections nearest its promise before the fan-out. Embeddings
+    # propose, sys1 disposes — this filters the state, never the verdicts;
+    # C7 requires verdict equality with the unshortlisted baseline on a fixture.
+    shortlists: dict[str, set[int]] = {}
+    if getattr(args, "via_semantic", False):
+        from .judgment import sem1 as _sem1
+        from .semantics import SEM1_RAW_TAG, shortlist as _shortlist
+        if _sem1 is None:
+            print("error: --via-semantic requires sem1 (set DEV_DECISIONS_SEM1_PATH)", file=sys.stderr)
+            return EXIT_ERROR
+        k = int(getattr(args, "semantic_k", 0) or 4)
+        _embed_cache: dict[str, list] = {}
+
+        def _embed(texts: list[str]) -> list:
+            key = "|".join(texts)
+            if key not in _embed_cache:
+                _embed_cache[key] = _sem1.embed(
+                    [{"text": x} for x in texts],
+                    provider="llama-server", model="embeddinggemma-2-BF16").vectors
+            return _embed_cache[key]
+
+        for rel, promise in artifacts:
+            if rel in doc_missing:
+                continue
+            secs = doc_sections[rel]
+            if not secs:
+                continue
+            vecs = _embed([promise, *[b for _h, b in secs]])
+            shortlists[rel] = set(_shortlist(vecs[0], vecs[1:], k))
+        kept = sum(len(s) for s in shortlists.values())
+        total = sum(len(doc_sections.get(r, [])) for r in shortlists)
+        print(f"  via-semantic [{SEM1_RAW_TAG}]: shortlisted {kept}/{total} sections (k={k})")
+
     # Request 1 — coverage: each artifact promise vs its document's sections.
     # Focused state: artifacts + doc sections, nothing else (context rot).
     cov_heads: list = []
@@ -977,7 +1011,9 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
         cov_heads.append(sys1.make_noul(
             f"Does the document {rel} now cover this promised update? Promise: {promise}",
             id=f"a{i}_updated"))
-        options = {f"d{j}.{s}": h for s, (h, _b) in enumerate(secs)}
+        _keep = shortlists.get(rel)
+        options = {f"d{j}.{s}": h for s, (h, _b) in enumerate(secs)
+                   if _keep is None or s in _keep}
         options["none"] = "No section in this document covers the promise."
         cov_heads.append(sys1.make_choice(
             f"Which section of {rel} covers the promised update?",
@@ -986,7 +1022,10 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
     for i, (rel, promise) in enumerate(artifacts):
         parts.append(f"A{i} -> {rel}: {promise}")
     for j, rel in enumerate(doc_rels):
+        _keep = shortlists.get(rel)
         for s, (h, b) in enumerate(doc_sections[rel]):
+            if _keep is not None and s not in _keep:
+                continue
             parts.append(f"=== d{j}.{s} [{h}] ({rel}) ===\n{b[:_DOCS_GATE_SECTION_CHARS]}")
     cov_state = "\n\n".join(parts)[: cfg["providers"].get("drex_max_chars", 400_000)]
 
@@ -1073,6 +1112,8 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
         print("    staleness: no diff supplied — skipped")
 
     gaps = bool(uncovered or stale_hits)
+    if shortlists:
+        providers_used = f"sem1_raw+{providers_used}" if providers_used else "sem1_raw"
     log_record({
         "op": "docs-gate",
         "plan": str(plan_path),
@@ -1081,6 +1122,7 @@ def cmd_docs_gate(args: argparse.Namespace) -> int:
         "input_sha256": _sha16(cov_state),
         "heads": answers,
         "artifacts": len(artifacts),
+        "via_semantic": {r: sorted(s) for r, s in sorted(shortlists.items())} if shortlists else None,
         "uncovered": uncovered,
         "stale_claims": stale_hits,
         "verdict": "gaps" if gaps else "pass",

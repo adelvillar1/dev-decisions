@@ -115,6 +115,44 @@ def _bootstrap_sdm1():
 
 sdm1 = _bootstrap_sdm1()
 
+
+def _bootstrap_sem1():
+    """Sibling bootstrap for the sem1 semantic-embeddings library (same layout
+    covenant as sys1/sdm1): env path, ~/Projects/sem1/src, then sibling sem1/src
+    under the script's parents."""
+    try:
+        import sem1  # type: ignore[import-not-found]
+        return sem1
+    except ImportError:
+        pass
+    candidates: list[Path] = []
+    env = os.environ.get("DEV_DECISIONS_SEM1_PATH")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.append(Path.home() / "Projects" / "sem1" / "src")
+    here = Path(__file__).resolve()
+    for parent in here.parents[:4]:
+        candidates.append(parent / "sem1" / "src")
+    for cand in candidates:
+        s = str(cand)
+        if not cand.is_dir():
+            continue
+        if s not in sys.path:
+            sys.path.insert(0, s)
+        try:
+            import sem1  # type: ignore[import-not-found]
+            return sem1
+        except ImportError:
+            try:
+                sys.path.remove(s)
+            except ValueError:
+                pass
+            continue
+    return None
+
+
+sem1 = _bootstrap_sem1()
+
 # --provider choices: dynamic from the sys1 registry, so candidate models
 # (clm, kev, tev1, decide_1b, ...) show up as soon as sys1 registers them —
 # plus the fan-out aliases and the sdm1 tabular lane (a dev-decisions-level

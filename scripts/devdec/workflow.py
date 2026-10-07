@@ -980,6 +980,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"sdm1:   not importable — tabular lane unavailable ({sdm1_reason})")
 
+    # sem1 library (semantic embeddings lane — batch-only, eval-only)
+    from .judgment import sem1 as _sem1
+    from .semantics import sem1_ready as _sem1_ready
+
+    _sem1_ok, _sem1_reason = _sem1_ready()
+    if _sem1 is not None:
+        try:
+            print(f"sem1:   v{_sem1.__version__} ({_sem1_reason})")
+        except Exception:
+            print(f"sem1:   available ({_sem1_reason})")
+    else:
+        print(f"sem1:   not importable — semantic lane unavailable ({_sem1_reason})")
+
     # config
     if CONFIG_FILE.exists():
         print(f"config: {CONFIG_FILE} ✓")
