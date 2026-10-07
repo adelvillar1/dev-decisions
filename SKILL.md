@@ -440,3 +440,10 @@ same disposition/calibration loop, EVAL-ONLY until floors exist.
   nearest graded neighbors with labels + disposition pairing),
   `docs-gate --via-semantic` (EVAL-ONLY k=4 section shortlist before the
   fan-out; verdict must equal the unshortlisted baseline).
+- **Kit bridge (2026-10-07)**: `--json` (one JSON object per line — the
+  `world.*` machine contract; human text stays the default), `--corpus <name>`
+  (per-corpus stores under `vectors/<name>/`; the default calibration root is
+  byte-identical; store/model auto-resolves when the corpus holds exactly one
+  model store), and `semantic-index --inputs <dir>` (file-directory indexing:
+  extension-routed text→llama-server, images→st-worker; idempotent per content
+  sha and accumulates across runs; a corpus name must be a filesystem slug).

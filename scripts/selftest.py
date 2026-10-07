@@ -685,6 +685,140 @@ class TestSemanticLane(unittest.TestCase):
         self.assertNotIn("uncovered = shortlists", src)
         self.assertNotIn("stale_hits = shortlists", src)
 
+    # ── kit-bridge extensions (2026-10-07 semantic-loops plan W0) ───────────
+
+    def test_corpus_root_resolution(self):
+        sem = self._sem
+        self.assertEqual(sem.corpus_root(None), sem.VECTORS_DIR)
+        self.assertEqual(sem.corpus_root("calibration"), sem.VECTORS_DIR)
+        self.assertEqual(sem.corpus_root("renders"), sem.VECTORS_DIR / "renders")
+        with self.assertRaises(SystemExit):
+            sem.corpus_root("../escape")
+        with self.assertRaises(SystemExit):
+            sem.corpus_root("a/b")
+
+    def test_collect_input_files_partitions_by_extension(self):
+        sem = self._sem
+        root = self._td / "inputs"
+        root.mkdir()
+        for name in ("a.png", "b.txt", "c.md", "d.weird", "e.JPG"):
+            (root / name).write_text("x")
+        parts = sem.collect_input_files(root)
+        self.assertEqual([p.name for p in parts["image"]], ["a.png", "e.JPG"])
+        self.assertEqual([p.name for p in parts["text"]], ["b.txt", "c.md"])
+        self.assertEqual(parts["skipped"], 1)
+
+    def test_merge_entries_accumulates_and_dedups(self):
+        sem = self._sem
+        existing = {"entries": [{"key": "k1", "sha256": "k1"}, {"key": "k2", "sha256": "k2"}]}
+        new = [{"key": "k2", "sha256": "k2"}, {"key": "k3", "sha256": "k3"}]
+        merged = sem.merge_entries(existing, new)
+        self.assertEqual([e["key"] for e in merged], ["k1", "k2", "k3"])
+        self.assertEqual([e["key"] for e in sem.merge_entries(None, new)], ["k2", "k3"])
+
+    def test_cos_dim_mismatch_raises(self):
+        sem = self._sem
+        with self.assertRaises(ValueError):
+            sem._cos([1.0, 0.0], [1.0, 0.0, 0.0])
+
+    def _fixture_store(self, subdir="renders", dims=4):
+        from sem1.store import VectorStore
+        vs = VectorStore(self._sem.VECTORS_DIR if subdir is None else self._sem.VECTORS_DIR / subdir)
+        vecs = [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
+        vs.rebuild("fake-model", dims, "st-worker",
+                   [(f"k{i}", f"k{i}", v) for i, v in enumerate(vecs)],
+                   meta=[{"path": f"f{i}.png"} for i in range(3)])
+        return vs, vecs
+
+    def _ns(self, **kw):
+        import argparse
+        base = dict(model=None, limit=20, feedback=None, corpus=None, json=True,
+                    vectors_dir=None, provider="llama-server", endpoint=None,
+                    text=None, file=None, k=5, query_vector=None, inputs=None, log_dir=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_dedup_json_lines_over_fixture_corpus(self):
+        import contextlib
+        import io
+        self._fixture_store()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self._sem.cmd_semantic_dedup(self._ns(corpus="renders", limit=10))
+        self.assertEqual(rc, self._sem.EXIT_OK)
+        lines = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        self.assertTrue(all(isinstance(l, dict) for l in lines))
+        summary = lines[0]
+        self.assertEqual(summary["op"], "semantic-dedup")
+        self.assertEqual(summary["pairs"], 1)
+        pair = lines[1]
+        self.assertEqual(pair["pair"], ["k0", "k1"])
+        self.assertGreater(pair["score"], 0.90)
+
+    def test_nn_json_resolves_corpus_model(self):
+        import contextlib
+        import io
+        self._fixture_store()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self._sem.cmd_semantic_nn(self._ns(corpus="renders", query_vector="1,0,0,0", k=2))
+        self.assertEqual(rc, self._sem.EXIT_OK)
+        lines = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        self.assertEqual(lines[0]["op"], "semantic-nn")
+        self.assertEqual(lines[0]["model"], "fake-model")  # auto-resolved from the corpus
+        self.assertEqual(lines[1]["key"], "k0")
+        self.assertGreater(lines[1]["score"], 0.99)
+
+    def test_nn_dim_mismatch_is_a_named_error(self):
+        self._fixture_store()
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self._sem.cmd_semantic_nn(self._ns(corpus="renders", query_vector="1,0", k=2))
+        self.assertEqual(rc, self._sem.EXIT_ERROR)
+        self.assertIn("dim mismatch", err.getvalue())
+
+    def test_inputs_mode_idempotent_and_json(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        sem = self._sem
+        root = self._td / "wave"
+        root.mkdir()
+        for name, body in (("r1.png", b"render-one"), ("r2.png", b"render-two"), ("notes.md", b"note text")):
+            (root / name).write_bytes(body)
+        calls = []
+        def fake_embed(items, provider, endpoint=None):
+            calls.append(provider)
+            vecs = []
+            for it in items:
+                seed = 1.0 if "image" in it else 0.5
+                vecs.append([seed, 0.1, 0.0, 0.0])
+            return SimpleNamespace(vectors=vecs, dims=4, model="fake-model",
+                                   provider=provider, telemetry={})
+        real_embed = sem._embed_items
+        sem._embed_items = fake_embed
+        try:
+            outs = []
+            for _round in (1, 2):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = sem.cmd_semantic_index(self._ns(inputs=str(root), corpus="renders"))
+                self.assertEqual(rc, sem.EXIT_OK)
+                outs.append(json.loads(out.getvalue().splitlines()[0]))
+        finally:
+            sem._embed_items = real_embed
+        first, second = outs
+        self.assertEqual(first["text_files"], 1)
+        self.assertEqual(first["image_files"], 2)
+        self.assertEqual(first["skipped_files"], 0)
+        self.assertEqual(first["indexed"], 3)
+        # idempotent: the second run rebuilds the same manifest, no accumulation
+        self.assertEqual(second["indexed"], 3)
+        self.assertIn("st-worker", calls)
+        self.assertIn("llama-server", calls)
+
 
 
 if __name__ == "__main__":

@@ -296,25 +296,35 @@ def build_parser() -> argparse.ArgumentParser:
                     help="EVAL-ONLY: rebuild the vector index over the calibration stores")
     sp.add_argument("--provider", default="llama-server", help="sem1 provider (llama-server | st-worker)")
     sp.add_argument("--endpoint", default=None, help="Override llama-server endpoint")
+    sp.add_argument("--corpus", default=None, help="Named corpus (default: the calibration store root)")
+    sp.add_argument("--inputs", default=None, help="Index files from a directory instead of the calibration stores")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.add_argument("--log-dir", dest="log_dir", default=None, help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_semantic_index)
 
     sp = sub.add_parser("semantic-dedup",
-                    help="EVAL-ONLY: near-dupe pairs over the indexed calibration store")
+                    help="EVAL-ONLY: near-dupe pairs over an indexed corpus")
     sp.add_argument("--model", default=None, help="Vector store model slug (default: embeddinggemma-2-BF16)")
     sp.add_argument("--limit", type=int, default=20, help="Max pairs to print")
+    sp.add_argument("--corpus", default=None, help="Named corpus (default: the calibration store root)")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
+    sp.add_argument("--vectors-dir", dest="vectors_dir", default=None, help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_semantic_dedup)
 
     sp = sub.add_parser("semantic-nn",
                     help="EVAL-ONLY: nearest graded neighbors for a text or file")
     sp.add_argument("--text", default=None, help="Query text")
-    sp.add_argument("--file", default=None, help="Query file (first 8000 chars)")
+    sp.add_argument("--file", default=None, help="Query file (first 8000 chars; image extensions ride st-worker)")
     sp.add_argument("--k", type=int, default=5, help="Neighbors to print")
     sp.add_argument("--provider", default="llama-server", help="sem1 provider for the query embed")
     sp.add_argument("--endpoint", default=None, help="Override llama-server endpoint")
     sp.add_argument("--model", default=None, help="Vector store model slug")
+    sp.add_argument("--corpus", default=None, help="Named corpus (default: the calibration store root)")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
+    sp.add_argument("--vectors-dir", dest="vectors_dir", default=None, help=argparse.SUPPRESS)
+    sp.add_argument("--query-vector", dest="query_vector", default=None, help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_semantic_nn)
 
 
