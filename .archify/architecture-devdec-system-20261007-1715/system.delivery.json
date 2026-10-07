@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "cd0e7e8f-27e7-4437-b401-0451ca1a0900",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/alejandrodelvillar/Projects/dev-decisions/.archify/architecture-devdec-system-20261007-1715/candidate.json",
+  "output": "/Users/alejandrodelvillar/Projects/dev-decisions/.archify/architecture-devdec-system-20261007-1715/system.html",
+  "specification": {
+    "sha256": "73ae810a794a7bd0f92c63db3983bb5f9bd28ab3927a0e298cb4bdbc1f777853",
+    "bytes": 7204
+  },
+  "artifact": {
+    "sha256": "2f62becf3be6d261cfb667ddc0b6279df459802c2108e8baf84a01cd22845882",
+    "bytes": 769051
+  }
+}

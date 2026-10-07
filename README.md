@@ -16,7 +16,7 @@ Three deployment layers (git hooks, a global ZCode hook, and the CLI), each inde
 
 Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` is the calibration dataset.
 
-![dev-decisions architecture](docs/architecture.svg)
+[![dev-decisions architecture](docs/architecture/system.png)](docs/architecture/system.html)
 
 ## Providers
 
@@ -134,8 +134,6 @@ Every feature is a named task with provider-specific heads. Add new tasks by def
 | `commit_risk_prior` | `risk-prior` command | Per-directory revert prior (cached for the pre-push advisory) |
 | `fleet_anomaly` | `fleet-anomaly` command | Repo whose activity deviates from fleet peers |
 | `issue_component_route` | `triage-issues --sdm1-route` | Eval-only component routing from structured features |
-
-![workflows — the gate family](docs/workflows.svg)
 
 ## Contract gates
 
@@ -357,8 +355,6 @@ dev-decisions remove-hooks /path/to/repo
 ## How a decision flows
 
 `classify-diff`, `scan-staged`, `pr-gate`, and `fleet-scan` share one pipeline: local secret scan first, then guards, then the task registry, then provider routing, then the confidence gate. Every step is appended to the JSONL log.
-
-![decision flow](docs/decision-flow.svg)
 
 ## ZCode agent routing
 

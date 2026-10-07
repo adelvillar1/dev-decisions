@@ -932,15 +932,15 @@ def cmd_risk_prior(args: argparse.Namespace) -> int:
         }
         for d, f in sorted(feats.items())
     ]
-    table = [dict(r) for r in context]
-    # query rows: same directories, label withheld — the model smooths
+    # context rows carry the revert-history label; query rows are the same
+    # directories re-scored with the label withheld — the model smooths
     # revert risk from directory-shape neighbors (commits/churn).
-    for row in table:
-        row["prior"] = None
+    table = [dict(r) for r in context]
+    table += [{**r, "reverted": None} for r in context]
     telemetry: dict = {}
     out = tabular_classify(
         table,
-        target="prior",
+        target="reverted",
         task_type="classification",
         task_id="commit_risk_prior",
         table_name="risk-prior",
@@ -951,7 +951,9 @@ def cmd_risk_prior(args: argparse.Namespace) -> int:
     if out["ok"]:
         for p in out["predictions"]:
             d = context[p.row_index]["dir"]
-            prob = (p.probabilities or {}).get("yes")
+            probs = p.probabilities or {}
+            # single-class responses are exact complements: P(yes) = 1 - P(no)
+            prob = probs.get("yes", (1 - probs["no"]) if "no" in probs else None)
             rows.append({"dir": d, **{k: v for k, v in context[p.row_index].items() if k != "reverted"},
                          "revert_prior": round(prob, 4) if prob is not None else None,
                          "confidence": round(p.confidence, 4) if p.confidence is not None else None})
