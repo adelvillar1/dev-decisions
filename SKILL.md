@@ -418,3 +418,25 @@ features, fleet metrics). Same JSONL, same disposition/calibration loop.
 - **Anomaly semantics**: confidence = distribution coverage (fraction of the
   forecast band containing the observed value); floor 0.6 means the 0.2-0.8
   band must contain it.
+
+## Semantic embeddings lane (sem1)
+
+The third model class: embeddings over the graded history. Geometry only —
+near-dupe recovery, nearest graded neighbors, gate shortlists. Same JSONL,
+same disposition/calibration loop, EVAL-ONLY until floors exist.
+
+- **Provider**: the `sem1` library (bootstrapped beside sys1/sdm1:
+  `~/Projects/sem1/src` or `DEV_DECISIONS_SEM1_PATH`), default backend the
+  native llama-server LaunchAgent at `http://127.0.0.1:8901` (no key for
+  localhost); `st-worker` (in-repo `.venv-st`, sentence-transformers) adds
+  images. Capability probes are first-class: a provider refuses modalities it
+  cannot prove (`ProviderCapabilityError`) instead of answering.
+- **Batch-only + eval-only**: rows tagged `sem1_raw`; no hook path references
+  this lane; similarity scores never gate, block, or join.
+- **Commands**: `semantic-index` (vector index over the calibration stores —
+  embeds what each redacted row still references: plan files, stored claims,
+  feedback notes; idempotent), `semantic-dedup` (EVAL-ONLY near-dupe pairs
+  with graded context, threshold 0.9), `semantic-nn --text/--file` (EVAL-ONLY
+  nearest graded neighbors with labels + disposition pairing),
+  `docs-gate --via-semantic` (EVAL-ONLY k=4 section shortlist before the
+  fan-out; verdict must equal the unshortlisted baseline).

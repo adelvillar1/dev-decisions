@@ -26,6 +26,7 @@ from .workflow import cmd_bulk_install, cmd_classify_diff, cmd_config, cmd_docto
 from .gates import cmd_arch_gate, cmd_calibration, cmd_disposition, cmd_docs_gate, cmd_evidence_gate, cmd_feedback, cmd_judge, cmd_plan_gate, cmd_plan_reconcile, cmd_plan_surface, cmd_pr_gate
 from .corpora import cmd_changelog, cmd_triage_issues, cmd_uc_gate, cmd_ux_gate, cmd_ux_surface
 from .tabular import cmd_budget_gate, cmd_fleet_anomaly, cmd_history_gate, cmd_override_prior, cmd_record_bench, cmd_record_runs, cmd_risk_prior
+from .semantics import cmd_semantic_dedup, cmd_semantic_index, cmd_semantic_nn
 from .dashboard import cmd_dashboard
 from .config import DEFAULT_MAX_DIFF_CHARS, EXIT_OK, VERSION
 from .judgment import PROVIDER_CHOICES
@@ -120,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--repo-root", default=None, help="Repo root for resolving linked doc paths (default: cwd)")
     sp.add_argument("--provider", choices=PROVIDER_CHOICES, default=None,
                     help="Override config provider")
+    sp.add_argument("--via-semantic", dest="via_semantic", action="store_true",
+                    help="EVAL-ONLY: shortlist doc sections per claim via sem1 embeddings before the fan-out")
+    sp.add_argument("--semantic-k", dest="semantic_k", type=int, default=4,
+                    help="Sections kept per claim by --via-semantic (default 4)")
     sp.set_defaults(func=cmd_docs_gate)
 
     # arch-gate
@@ -285,6 +290,33 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_dashboard)
 
     # ── tabular decision lane (sdm1 / hosted TabPFN — batch commands only) ──
+
+    # ── semantic embeddings lane (sem1 — batch commands only, eval-only) ──
+    sp = sub.add_parser("semantic-index",
+                    help="EVAL-ONLY: rebuild the vector index over the calibration stores")
+    sp.add_argument("--provider", default="llama-server", help="sem1 provider (llama-server | st-worker)")
+    sp.add_argument("--endpoint", default=None, help="Override llama-server endpoint")
+    sp.add_argument("--log-dir", dest="log_dir", default=None, help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_semantic_index)
+
+    sp = sub.add_parser("semantic-dedup",
+                    help="EVAL-ONLY: near-dupe pairs over the indexed calibration store")
+    sp.add_argument("--model", default=None, help="Vector store model slug (default: embeddinggemma-2-BF16)")
+    sp.add_argument("--limit", type=int, default=20, help="Max pairs to print")
+    sp.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_semantic_dedup)
+
+    sp = sub.add_parser("semantic-nn",
+                    help="EVAL-ONLY: nearest graded neighbors for a text or file")
+    sp.add_argument("--text", default=None, help="Query text")
+    sp.add_argument("--file", default=None, help="Query file (first 8000 chars)")
+    sp.add_argument("--k", type=int, default=5, help="Neighbors to print")
+    sp.add_argument("--provider", default="llama-server", help="sem1 provider for the query embed")
+    sp.add_argument("--endpoint", default=None, help="Override llama-server endpoint")
+    sp.add_argument("--model", default=None, help="Vector store model slug")
+    sp.add_argument("--feedback", default=None, help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_semantic_nn)
+
 
     sp = sub.add_parser("override-prior",
                         help="Per-head override probabilities + suggested floors from the graded stores (sdm1)")

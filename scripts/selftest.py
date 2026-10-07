@@ -552,5 +552,123 @@ class TestTabularLane(unittest.TestCase):
             socket.socket = real
 
 
+# ── semantic embeddings lane (2026-10-07 plan: sem1) ─────────────────────────
+
+
+class TestSemanticLane(unittest.TestCase):
+    """Fixture-backed tests for the semantic surfaces (C5/C6/C8 mechanics).
+
+    All offline: no embedding endpoint is ever contacted — the tests pin the
+    pure layers (recoverable-text, entry building, dedup pairs, shortlist,
+    feedback join) plus the hook-path isolation rule. The lane lives in the
+    devdec package only, so setUp merges its public names into the under-test
+    namespace and isolates its LOG/VECTORS dirs.
+    """
+
+    def setUp(self):
+        import sys as _sys
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        td = Path(self._tmp.name)
+        scripts = str(_HERE.parent)
+        if scripts not in _sys.path:
+            _sys.path.insert(0, scripts)
+        import devdec.config as _cfg
+        import devdec.semantics as _sem
+
+        self._saved = (_cfg.LOG_DIR, _sem.LOG_DIR, _sem.VECTORS_DIR, _sem.FEEDBACK_FILE)
+        _cfg.LOG_DIR = td / "logs"
+        _sem.LOG_DIR = td / "logs"
+        _sem.VECTORS_DIR = td / "vectors"
+        _sem.FEEDBACK_FILE = td / "logs" / "feedback" / "feedback.jsonl"
+        self._sem = _sem
+        for _name in (
+            "iter_log_rows", "recoverable_text", "build_entries", "dedup_pairs",
+            "shortlist", "load_feedback_by_sha", "sem1_ready", "_cos",
+        ):
+            setattr(dd, _name, getattr(_sem, _name))
+        self._td = td
+
+    def tearDown(self):
+        import devdec.config as _cfg
+        _cfg.LOG_DIR, self._sem.LOG_DIR, self._sem.VECTORS_DIR, self._sem.FEEDBACK_FILE = self._saved
+        self._tmp.cleanup()
+
+    def test_recoverable_text_priority(self):
+        # plan file that exists wins; then claims; then note; else None.
+        plan = self._td / "p.md"
+        plan.write_text("# Plan: x\n" + "criterion text\n" * 5)
+        sem = self._sem
+        self.assertIn("criterion text", sem.recoverable_text({"plan": str(plan)}))
+        self.assertIsNone(sem.recoverable_text({"plan": str(self._td / "missing.md")}))
+        self.assertIn("claim A", sem.recoverable_text({"claims": ["claim A", "claim B"]}))
+        self.assertIn("[safety] watch out", sem.recoverable_text({"task": "safety", "note": "watch out"}))
+        self.assertIsNone(sem.recoverable_text({"op": "classify-diff"}))
+
+    def test_build_entries_dedups_and_skips(self):
+        sem = self._sem
+        plan = self._td / "p.md"
+        plan.write_text("plan body text")
+        rows = [
+            (Path("a"), {"op": "plan-gate", "input_sha256": "sha1", "plan": str(plan)}),
+            (Path("b"), {"op": "plan-gate", "input_sha256": "sha1", "plan": str(plan)}),  # dupe key
+            (Path("c"), {"op": "classify-diff"}),  # no recoverable text
+            (Path("d"), {"op": "feedback", "note": "human note"}),  # fallback key
+        ]
+        entries = sem.build_entries(rows)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["key"], "sha1")
+        self.assertTrue(entries[1]["key"])  # fallback key present, not sha1
+
+    def test_dedup_pairs_finds_planted_pair_only(self):
+        sem = self._sem
+        vecs = [
+            [1.0, 0.0],
+            [0.99, 0.02] * 1 + [],  # keep dims honest below
+        ][:1]
+        vecs = [
+            [1.0, 0.0],
+            [0.995, 0.02],   # near-dupe of row 0 (cos ~0.9998)
+            [0.0, 1.0],      # orthogonal
+        ]
+        pairs = sem.dedup_pairs(vecs, threshold=0.90)
+        self.assertEqual(len(pairs), 1)
+        i, j, score = pairs[0]
+        self.assertEqual((i, j), (0, 1))
+        self.assertGreater(score, 0.90)
+
+    def test_shortlist_orders_by_cosine(self):
+        sem = self._sem
+        query = [1.0, 0.0]
+        cands = [[0.0, 1.0], [0.9, 0.1], [0.5, 0.5]]
+        self.assertEqual(sem.shortlist(query, cands, 2), [1, 2])
+
+    def test_feedback_join(self):
+        sem = self._sem
+        fb = self._td / "logs" / "feedback" / "feedback.jsonl"
+        fb.parent.mkdir(parents=True, exist_ok=True)
+        fb.write_text(json.dumps({
+            "input_sha256": "shaX", "label": "correct", "task": "plan_gate",
+            "note": "verified", "provider": "jev", "ts": "t"}) + "\n")
+        joined = sem.load_feedback_by_sha(fb)
+        self.assertEqual(joined["shaX"][0]["label"], "correct")
+        self.assertEqual(joined["shaX"][0]["note"], "verified")
+
+    def test_hook_paths_have_no_semantic_references(self):
+        # C8: the sync hook paths must never reference the semantic lane.
+        import inspect
+        import devdec.workflow as wf
+        for fn in (wf.cmd_scan_staged, wf.cmd_classify_diff, wf.cmd_zcode_gate):
+            src = inspect.getsource(fn).lower()
+            self.assertNotIn("sem1", src, fn.__name__)
+            self.assertNotIn("semantic", src, fn.__name__)
+
+    def test_eval_only_tag_constant(self):
+        self.assertEqual(self._sem.SEM1_RAW_TAG, "sem1_raw")
+
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

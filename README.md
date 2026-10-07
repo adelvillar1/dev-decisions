@@ -31,6 +31,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 | Evaluating | **Julia** (`julia-1`, supersoniclabs) | BERT-based, systemone-shaped wire; cheapest hosted. Calibrated out of the default chain — where it fits is still being figured out |
 | Eval only (not in active roster) | **ModernBERT** | Calibration comparison, kept available |
 | Tabular decisions (batch lane) | **TabPFN-3.5 hosted** (Prior Labs, via the sdm1 library) | Calibrated classification, quantile forecasts, and anomaly bands over tables — run histories, benchmark series, the calibration stores. Batch-only: ~minutes-scale small tasks, never in a hook path |
+| Semantic embeddings (batch lane) | **EmbeddingGemma-2 local** (native llama-server + sentence-transformers, via the sem1 library) | Geometry over the graded history — near-dupe recovery, nearest graded neighbors, gate shortlists. Eval-only (`sem1_raw`), batch-only, never in a hook path |
 
 ### Candidate models (opt-in, via sys1 flags)
 
@@ -182,6 +183,30 @@ Routing: `[classify] by_task` can send a text task to `sdm1`; the lane
 declines when no labeled tabular context exists (declines are first-class).
 `triage-issues --sdm1-route` scores component routing EVAL-ONLY — logged for
 calibration, never applied as labels.
+
+## Semantic embeddings lane (sem1)
+
+The third model class: sys1 judges what the work **says**, the tabular lane
+scores what the work **measures**, and the semantic lane indexes what the
+work **looks like** — embeddings over the graded history so near-dupe inputs,
+nearest graded neighbors, and gate shortlists stop being
+exact-`input_sha256`-only. It runs on the [sem1](https://github.com/adelvillar1/sem1)
+library (bootstrapped beside sys1 and sdm1) against the local native
+llama-server (LaunchAgent-owned, `http://127.0.0.1:8901`, no key for
+localhost); the `st-worker` provider adds images via sentence-transformers.
+
+**Operating rule: embeddings propose, sys1 disposes.** Everything here is
+EVAL-ONLY (rows tagged `sem1_raw` in `providers_used`) — similarity thresholds
+don't transfer, so no verdict or join consumes these scores until per-surface
+calibration floors exist. **Batch-only rule** as in the tabular lane: no hook
+path references this lane (socket-guard test).
+
+| Command | What it does | Evidence source |
+|---|---|---|
+| `semantic-index` | Rebuild the vector index over the calibration stores — embeds what each redacted row still references (plan files on disk, stored claims, feedback notes), keyed by `input_sha256`; idempotent | JSONL events + feedback stores |
+| `semantic-dedup` | EVAL-ONLY near-dupe pairs (threshold 0.9) with each side's graded labels and disposition context | the vector index |
+| `semantic-nn --text/--file` | EVAL-ONLY nearest graded neighbors of a query, with labels and disposition pairing | the vector index |
+| `docs-gate --via-semantic` | EVAL-ONLY shortlist (default k=4) of doc sections per claim before the fan-out; verdict must equal the unshortlisted baseline | linked docs, embedded per run |
 
 ## UX corpus (ux-surface + ux-gate)
 

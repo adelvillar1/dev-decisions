@@ -54,3 +54,12 @@ advisory_only = true   # true = warn+proceed; false = block
 # Batch-only rule: no tabular command may run a live model call in a
 # synchronous hook path — hooks read cached tables under
 # ~/.local/share/dev-decisions/tables/.
+
+# Semantic embeddings lane (sem1) — batch commands only, eval-only until
+# calibrated. The library is discovered like sys1 (~/Projects/sem1/src or
+# DEV_DECISIONS_SEM1_PATH). The default endpoint is the native llama-server
+# LaunchAgent at http://127.0.0.1:8901 (no key for localhost); no keys are
+# read from this file. Batch-only rule: no semantic command may run a live
+# embed in a synchronous hook path — hooks never reference this lane.
+# Every semantic row is tagged providers_used="sem1_raw/..." so production
+# metrics can filter it until per-surface calibration floors exist.
