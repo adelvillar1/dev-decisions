@@ -669,6 +669,23 @@ class TestSemanticLane(unittest.TestCase):
 
 
 
+    def test_docs_gate_via_semantic_cannot_block(self):
+        # C7: the shortlist is log-only state filtering — cmd_docs_gate's exit
+        # vocabulary stays OK/WARN (advisorial), and the shortlist never feeds
+        # the gap derivation except through the unchanged answers path.
+        import inspect
+        import devdec.gates as gates
+        src = inspect.getsource(gates.cmd_docs_gate)
+        self.assertNotIn("EXIT_BLOCK", src)  # advisory gate: never blocks
+        self.assertIn("return EXIT_WARN if gaps else EXIT_OK", src)
+        self.assertIn("EVAL-ONLY semantic shortlist", src)
+        self.assertIn('providers_used = f"sem1_raw', src)
+        # the shortlist dict is derived from embeddings and only read for
+        # options/state filtering — never assigned to uncovered/stale_hits
+        self.assertNotIn("uncovered = shortlists", src)
+        self.assertNotIn("stale_hits = shortlists", src)
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
