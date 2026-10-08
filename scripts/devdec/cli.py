@@ -27,6 +27,7 @@ from .gates import cmd_arch_gate, cmd_calibration, cmd_disposition, cmd_docs_gat
 from .corpora import cmd_changelog, cmd_triage_issues, cmd_uc_gate, cmd_ux_gate, cmd_ux_surface
 from .tabular import cmd_budget_gate, cmd_fleet_anomaly, cmd_history_gate, cmd_override_prior, cmd_record_bench, cmd_record_runs, cmd_risk_prior
 from .semantics import cmd_semantic_dedup, cmd_semantic_index, cmd_semantic_nn
+from .media import cmd_media_budget, cmd_media_gate, cmd_media_imagine, cmd_media_speak, cmd_media_transcribe, cmd_record_asr, cmd_record_media_runs
 from .dashboard import cmd_dashboard
 from .config import DEFAULT_MAX_DIFF_CHARS, EXIT_OK, VERSION
 from .judgment import PROVIDER_CHOICES
@@ -376,6 +377,63 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--all-query", action="store_true", help="Score every repo as a query row (default: latest only)")
     sp.add_argument("--floor", type=float, default=0.6, help="Coverage floor below which a repo flags (default 0.6)")
     sp.set_defaults(func=cmd_fleet_anomaly)
+
+    # ── media generation lane (gen1 — batch commands only, eval-only) ──
+
+    sp = sub.add_parser("media-gate",
+                        help="EVAL-ONLY: verify a rendered narration against its script (advisory — WARN on gaps, never blocks)")
+    sp.add_argument("--script", default=None, help="Ground-truth script text (single-file mode)")
+    sp.add_argument("--audio", default=None, help="Rendered audio file (single-file mode)")
+    sp.add_argument("--request", default=None, help="audio_request.json (seam mode)")
+    sp.add_argument("--meta", default=None, help="audio_meta.json (seam mode)")
+    sp.add_argument("--project", default=None, help="Render project dir that audio paths resolve against (seam mode)")
+    sp.add_argument("--language", default=None, help="Language hint for the ASR leg")
+    sp.set_defaults(func=cmd_media_gate)
+
+    sp = sub.add_parser("media-transcribe",
+                        help="Transcribe an audio file through gen1 (batch-only; one accountable log row)")
+    sp.add_argument("--audio", required=True, help="Audio file to transcribe")
+    sp.add_argument("--language", default=None, help="Language hint")
+    sp.add_argument("--provider", default=None, help="Force one gen1 provider")
+    sp.set_defaults(func=cmd_media_transcribe)
+
+    sp = sub.add_parser("media-speak",
+                        help="EVAL-ONLY: render text to speech through gen1 (batch-only; one accountable log row)")
+    sp.add_argument("--text", default=None, help="Literal text to render")
+    sp.add_argument("--text-file", default=None, help="Read the text from a file")
+    sp.add_argument("--out", required=True, help="Output audio file")
+    sp.add_argument("--voice", default=None, help="Voice id from the provider catalog")
+    sp.add_argument("--language", default="en", help="Language (default: en)")
+    sp.add_argument("--format", default=None, help="Output format (provider default)")
+    sp.add_argument("--speed", type=float, default=None, help="Speech rate multiplier")
+    sp.add_argument("--instruction", default=None, help="Delivery instruction (providers that support it)")
+    sp.add_argument("--provider", default=None, help="Force one gen1 provider")
+    sp.set_defaults(func=cmd_media_speak)
+
+    sp = sub.add_parser("media-imagine",
+                        help="EVAL-ONLY: render image(s) through gen1 (batch-only; one accountable log row)")
+    sp.add_argument("--prompt", default=None, help="Literal prompt")
+    sp.add_argument("--prompt-file", default=None, help="Read the prompt from a file")
+    sp.add_argument("--out", required=True, help="Output directory for the image files")
+    sp.add_argument("--aspect-ratio", default="1:1", help="Aspect ratio (default: 1:1)")
+    sp.add_argument("--n", type=int, default=1, help="Images to render (default: 1)")
+    sp.add_argument("--provider", default=None, help="Force one gen1 provider")
+    sp.set_defaults(func=cmd_media_imagine)
+
+    sp = sub.add_parser("record-asr",
+                        help="EVAL-ONLY: round-trip the pinned ASR fixture into the feedback store (per-provider accuracy)")
+    sp.add_argument("--fixtures", default=None, help="Fixture dir with .mp3/.txt pairs (default: scripts/fixtures/media)")
+    sp.set_defaults(func=cmd_record_asr)
+
+    sp = sub.add_parser("record-media-runs",
+                        help="Ingest gen1 telemetry into the media-seconds table (parse only; no model)")
+    sp.add_argument("--telemetry", default=None, help="Telemetry JSONL path (default: GEN1_TELEMETRY_FILE or ~/.config/gen1/telemetry.jsonl)")
+    sp.set_defaults(func=cmd_record_media_runs)
+
+    sp = sub.add_parser("media-budget",
+                        help="EVAL-ONLY: forecast daily media-seconds bands per provider and compare to a budget (sdm1)")
+    sp.add_argument("--budget-seconds", type=float, default=None, help="Next-day media-seconds budget (flag when the estimate exceeds it)")
+    sp.set_defaults(func=cmd_media_budget)
 
     # config
     sp = sub.add_parser("config", help="Show effective config")

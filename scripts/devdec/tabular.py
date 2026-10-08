@@ -768,7 +768,8 @@ def cmd_record_bench(args: argparse.Namespace) -> int:
 
 
 def forecast_band(
-    series: list[float], *, ahead: int = 1, telemetry: dict | None = None
+    series: list[float], *, ahead: int = 1, telemetry: dict | None = None,
+    task_id: str = "budget_forecast", table_name: str = "budget-gate"
 ) -> dict:
     """Forecast the next point(s) of a series via sdm1; pure input, banded output.
 
@@ -789,8 +790,8 @@ def forecast_band(
         table,
         target="value",
         task_type="forecast",
-        task_id="budget_forecast",
-        table_name="budget-gate",
+        task_id=task_id,
+        table_name=table_name,
         telemetry=telemetry,
     )
     if not out["ok"]:

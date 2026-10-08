@@ -820,6 +820,637 @@ class TestSemanticLane(unittest.TestCase):
         self.assertIn("llama-server", calls)
 
 
+# ── media generation lane (2026-10-08 plan: gen1) ────────────────────────────
+
+
+class TestGen1Lane(unittest.TestCase):
+    """Fixture-backed tests for the media generation lane (C0–C8 mechanics).
+
+    All offline: no provider key is read and no wire is ever contacted —
+    every wire call is stubbed at the wrapper seam. The tests pin the
+    bootstrap contract (hit plants, clean miss leaves sys.path untouched),
+    the fail-open wrapper shapes, the gate's exit vocabulary (never
+    EXIT_BLOCK), seam path-escape refusal, the fixture sha pins, the
+    feedback row shape plus the calibration join key, the telemetry parser
+    (corrupt named, occurrence-keyed idempotency), both media-budget paths,
+    the EVAL-ONLY help strings, and the hook-path isolation rule.
+    """
+
+    def setUp(self):
+        import sys as _sys
+
+        self._tmp = tempfile.TemporaryDirectory()
+        td = Path(self._tmp.name)
+        scripts = str(_HERE.parent)
+        if scripts not in _sys.path:
+            _sys.path.insert(0, scripts)
+        import devdec.config as _cfg
+        import devdec.media as _media
+        import devdec.tabular as _tab
+
+        self._saved = (
+            _cfg.LOG_DIR, _media.LOG_DIR, _media.FEEDBACK_FILE, _media.TABLES_DIR,
+            _tab.TABLES_DIR, _media.gen1, _media.media_transcribe, _media.forecast_band,
+        )
+        _cfg.LOG_DIR = td / "logs"
+        _media.LOG_DIR = td / "logs"
+        _media.FEEDBACK_FILE = td / "logs" / "feedback" / "feedback.jsonl"
+        _media.TABLES_DIR = td / "tables"
+        _tab.TABLES_DIR = td / "tables"
+        self._media = _media
+        for _name in (
+            "gen1_ready", "media_transcribe", "media_speak", "media_imagine",
+            "leg_tag", "compare_text", "cmd_media_gate", "cmd_record_asr",
+            "cmd_record_media_runs", "cmd_media_budget", "cmd_media_transcribe",
+            "cmd_media_speak", "cmd_media_imagine", "GEN1_RAW_TAG", "FIXTURES_DIR",
+            "NAR_S1_MP3_SHA256", "NAR_S1_TXT_SHA256", "MEDIA_RUNS_COLUMNS",
+            "MEDIA_RUNS_TABLE", "ASR_TASK", "ASR_HEAD", "MEDIA_BUDGET_TASK",
+            "EXIT_OK", "EXIT_WARN", "EXIT_ERROR",
+        ):
+            setattr(dd, _name, getattr(_media, _name))
+        self._td = td
+
+    def tearDown(self):
+        import devdec.config as _cfg
+        import devdec.tabular as _tab
+
+        (_cfg.LOG_DIR, self._media.LOG_DIR, self._media.FEEDBACK_FILE,
+         self._media.TABLES_DIR, _tab.TABLES_DIR, self._media.gen1,
+         self._media.media_transcribe, self._media.forecast_band) = self._saved
+        self._tmp.cleanup()
+
+    def _gns(self, **kw):
+        import argparse
+        base = dict(script=None, audio=None, request=None, meta=None,
+                    project=None, language=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _events(self):
+        """Today's isolated event rows (log_record writes LOG_DIR/YYYY/MM/DD)."""
+        rows = []
+        for f in sorted((self._td / "logs").glob("20*/*/*/events.jsonl")):
+            for line in f.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+        return rows
+
+    # ── C0: bootstrap contract ────────────────────────────────────────────────
+
+    def test_bootstrap_hit_plants_env_package(self):
+        import os as _os
+        import sys as _sys
+        import devdec.judgment as jt
+
+        missing = object()
+        saved_mod = _sys.modules.pop("gen1", missing)
+        saved_path = list(_sys.path)
+        _sys.path[:] = [p for p in _sys.path if not p.rstrip("/").endswith("gen1/src")]
+        planted = self._td / "planted"
+        (planted / "gen1").mkdir(parents=True)
+        (planted / "gen1" / "__init__.py").write_text(
+            "MARKER = 'env-hit'\n", encoding="utf-8")
+        _os.environ["DEV_DECISIONS_GEN1_PATH"] = str(planted)
+        try:
+            handle = jt._bootstrap_gen1()
+            self.assertIsNotNone(handle)
+            self.assertEqual(getattr(handle, "MARKER", None), "env-hit")
+            self.assertIn(str(planted), _sys.path)
+        finally:
+            _os.environ.pop("DEV_DECISIONS_GEN1_PATH", None)
+            _sys.path[:] = saved_path
+            if saved_mod is missing:
+                _sys.modules.pop("gen1", None)
+            else:
+                _sys.modules["gen1"] = saved_mod
+
+    def test_bootstrap_clean_miss_sys_path_unchanged(self):
+        import os as _os
+        import sys as _sys
+        import devdec.judgment as jt
+
+        missing = object()
+        saved_mod = _sys.modules.pop("gen1", missing)
+        saved_path = list(_sys.path)
+        # strip the real checkout so no candidate can resolve it, then poison
+        # sys.modules: every `import gen1` fails even where a dir exists
+        _sys.path[:] = [p for p in _sys.path if not p.rstrip("/").endswith("gen1/src")]
+        post_strip = list(_sys.path)
+        empty = self._td / "empty-pkg"
+        empty.mkdir()
+        _os.environ["DEV_DECISIONS_GEN1_PATH"] = str(empty)
+        _sys.modules["gen1"] = None
+        try:
+            handle = jt._bootstrap_gen1()
+            self.assertIsNone(handle)
+            self.assertEqual(_sys.path, post_strip)  # failed candidates leave no residue
+        finally:
+            _os.environ.pop("DEV_DECISIONS_GEN1_PATH", None)
+            _sys.path[:] = saved_path
+            if saved_mod is missing:
+                _sys.modules.pop("gen1", None)
+            else:
+                _sys.modules["gen1"] = saved_mod
+
+    # ── C1: doctor block + readiness shapes ────────────────────────────────────
+
+    def test_doctor_gen1_block_after_sem1_presence_only(self):
+        import inspect
+        import devdec.workflow as wf
+
+        src = inspect.getsource(wf.cmd_doctor)
+        gi = src.find("# gen1 library")
+        si = src.find("# sem1 library")
+        self.assertGreaterEqual(gi, 0, "doctor must carry the gen1 block")
+        self.assertGreater(gi, si, "gen1 block sits after the sem1 block")
+        block = src[gi:src.find("# config", gi)]
+        self.assertIn("gen1_ready", block)
+        self.assertIn("key_present", block)
+        self.assertIn("eval-only until calibrated", block)
+        # presence only: no key-file read and no env read can reach this output
+        self.assertNotIn("os.environ", block)
+        self.assertNotIn("load_key", block)
+        self.assertNotIn("ENV_FILE", block)
+
+    def test_gen1_ready_shapes(self):
+        med = self._media
+        real = med.gen1
+        try:
+            med.gen1 = None
+            ok, reason = med.gen1_ready()
+            self.assertFalse(ok)
+            self.assertIn("DEV_DECISIONS_GEN1_PATH", reason)
+
+            class Empty:
+                @staticmethod
+                def registry_names():
+                    return []
+            med.gen1 = Empty
+            ok, reason = med.gen1_ready()
+            self.assertFalse(ok)
+            self.assertIn("registry empty", reason)
+
+            class Full:
+                @staticmethod
+                def registry_names():
+                    return ["kokoro", "wan"]
+            med.gen1 = Full
+            ok, reason = med.gen1_ready()
+            self.assertTrue(ok)
+            self.assertIn("kokoro", reason)
+        finally:
+            med.gen1 = real
+
+    # ── C2: fail-open wrappers + comparator ────────────────────────────────────
+
+    def test_wrappers_fail_open_with_named_refusals(self):
+        from types import SimpleNamespace
+        med = self._media
+        real = med.gen1
+        try:
+            med.gen1 = None
+            res = med.media_transcribe(b"audio")
+            self.assertFalse(res["ok"])
+            self.assertIn("DEV_DECISIONS_GEN1_PATH", res["error"])
+
+            class Boom:
+                @staticmethod
+                def transcribe(audio, **kw):
+                    raise RuntimeError(
+                        "STEPFUN_API_KEY not set — export it or add it to "
+                        "/home/x/.config/gen1/env (chmod 600, never committed)")
+            med.gen1 = Boom
+            res = med.media_transcribe(b"audio")
+            self.assertFalse(res["ok"])
+            self.assertIn("STEPFUN_API_KEY", res["error"])
+            self.assertIn(".config/gen1/env", res["error"])
+
+            class Wire:
+                @staticmethod
+                def transcribe(audio, **kw):
+                    return SimpleNamespace(text="hello", provider="stepfun",
+                                           telemetry=SimpleNamespace(request_id="r1"))
+            med.gen1 = Wire
+            res = med.media_transcribe(b"audio")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["transcript"], "hello")
+            self.assertEqual(med.leg_tag(res["result"]), "gen1_raw/stepfun")
+            self.assertEqual(med.leg_tag(SimpleNamespace(provider="")), "gen1_raw/unknown")
+
+            class Refusing:
+                @staticmethod
+                def speak(text, **kw):
+                    raise ValueError("no voices")
+                @staticmethod
+                def imagine(prompt, **kw):
+                    raise ValueError("no images")
+            med.gen1 = Refusing
+            self.assertFalse(med.media_speak("hi")["ok"])
+            self.assertFalse(med.media_imagine("hi")["ok"])
+        finally:
+            med.gen1 = real
+
+    def test_compare_text_token_level_not_byte_exact(self):
+        med = self._media
+        ref = "Every engineering answer passes through three lanes — and one loop."
+        # punctuation normalization (the em-dash does not come back) never counts
+        got = "every engineering answer passes through three lanes and one loop."
+        cmp_ = med.compare_text(ref, got)
+        self.assertEqual(cmp_["agreement"], 1.0)
+        self.assertEqual(cmp_["missing"], 0)
+        self.assertEqual(cmp_["extra"], 0)
+        # a dropped token is a gap, named on both sides
+        gap = med.compare_text(ref, "every engineering answer passes through lanes and one loop.")
+        self.assertEqual(gap["missing"], 1)
+        self.assertEqual(gap["missing_tokens"], ["three"])
+        self.assertLess(gap["agreement"], 1.0)
+
+    # ── C3: media-gate ─────────────────────────────────────────────────────────
+
+    def test_media_gate_single_pass_gap_and_refusal(self):
+        from types import SimpleNamespace
+        import contextlib
+        import io
+        med = self._media
+        script = self._td / "s.txt"
+        script.write_text("alpha beta gamma delta\n", encoding="utf-8")
+        audio = self._td / "s.mp3"
+        audio.write_bytes(b"FAKE-AUDIO-BYTES")
+
+        def _stub(transcript):
+            def stub(audio_bytes, **kw):
+                return {"ok": True, "transcript": transcript,
+                        "result": SimpleNamespace(provider="stepfun"), "error": None}
+            return stub
+
+        def _refuse(audio_bytes, **kw):
+            return {"ok": False, "transcript": None, "result": None,
+                    "error": "STEPFUN_API_KEY not set"}
+
+        real = med.media_transcribe
+        try:
+            med.media_transcribe = _stub("alpha beta gamma delta")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_gate(self._gns(script=str(script), audio=str(audio)))
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertIn("agreement=1.000", out.getvalue())
+            row = [r for r in self._events() if r.get("op") == "media-gate"][-1]
+            self.assertEqual(row["lines"][0]["agreement"], 1.0)
+            self.assertFalse(row["escalated"])
+            self.assertNotIn("alpha", json.dumps(row))  # redacted: no content
+
+            med.media_transcribe = _stub("alpha beta delta")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_gate(self._gns(script=str(script), audio=str(audio)))
+            self.assertEqual(rc, med.EXIT_WARN)
+            self.assertIn("missing: gamma", out.getvalue())
+            self.assertIn("never blocks", out.getvalue())
+
+            med.media_transcribe = _refuse
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_gate(self._gns(script=str(script), audio=str(audio)))
+            self.assertEqual(rc, med.EXIT_ERROR)
+            self.assertNotEqual(rc, 2)  # all-refused is ERROR, never BLOCK
+        finally:
+            med.media_transcribe = real
+
+    def test_media_gate_seam_path_escape_refused_by_name(self):
+        from types import SimpleNamespace
+        import contextlib
+        import io
+        med = self._media
+        proj = self._td / "proj"
+        (proj / "renders").mkdir(parents=True)
+        (proj / "renders" / "l1.mp3").write_bytes(b"AUDIO-ONE")
+        request = self._td / "request.json"
+        request.write_text(json.dumps({"lines": [
+            {"id": "l1", "text": "alpha beta"},
+            {"id": "l2", "text": "gamma delta"},
+        ]}), encoding="utf-8")
+        meta = self._td / "meta.json"
+        meta.write_text(json.dumps({"voices": [
+            {"id": "l1", "path": "renders/l1.mp3"},
+            {"id": "l2", "path": "../../outside.mp3"},
+            {"id": "l9", "path": "renders/l1.mp3"},
+        ]}), encoding="utf-8")
+
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": "alpha beta",
+                    "result": SimpleNamespace(provider="stepfun"), "error": None}
+
+        real = med.media_transcribe
+        med.media_transcribe = stub
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_gate(self._gns(request=str(request), meta=str(meta),
+                                                   project=str(proj)))
+            txt = out.getvalue()
+            self.assertEqual(rc, med.EXIT_WARN)  # partial: one verified, one refused
+            self.assertIn("agreement=1.000", txt)
+            self.assertIn("path escapes --project: ../../outside.mp3", txt)
+            self.assertIn("no request line", txt)  # unpaired render flagged
+            row = [r for r in self._events() if r.get("op") == "media-gate"][-1]
+            self.assertEqual(len(row["lines"]), 1)
+            self.assertIn("path escapes", row["refused"][0]["error"])
+        finally:
+            med.media_transcribe = real
+
+    def test_media_gate_never_blocks_in_source(self):
+        import inspect
+        med = self._media
+        src = inspect.getsource(med.cmd_media_gate)
+        self.assertNotIn("EXIT_BLOCK", src)
+        module_src = Path(med.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("EXIT_BLOCK", module_src)
+
+    # ── C7: hook-path isolation ────────────────────────────────────────────────
+
+    def test_hooks_never_reference_media_lane(self):
+        import inspect
+        import devdec.workflow as wf
+
+        for fn in (wf.cmd_scan_staged, wf.cmd_classify_diff, wf.cmd_zcode_gate):
+            src = inspect.getsource(fn).lower()
+            self.assertNotIn("gen1", src, fn.__name__)
+            self.assertNotIn("media", src, fn.__name__)
+
+    def test_hook_entry_socket_guard(self):
+        import argparse
+        import contextlib
+        import io
+        import socket
+        import sys
+        import devdec.workflow as wf
+
+        def _no_network(*a, **k):
+            raise AssertionError("network call attempted in the hook path")
+
+        real_sock, real_stdin = socket.socket, sys.stdin
+        socket.socket = _no_network
+        try:
+            sys.stdin = io.StringIO(json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo gated-but-clean"},
+                "cwd": str(self._td),
+            }))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = wf.cmd_zcode_gate(argparse.Namespace())
+            self.assertEqual(rc, wf.EXIT_OK)  # clean command, no socket, no media
+        finally:
+            socket.socket = real_sock
+            sys.stdin = real_stdin
+
+    def test_generated_hooks_byte_identical_to_pinned_template(self):
+        import argparse
+        import devdec.workflow as wf
+
+        repo = self._td / "hookrepo"
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        rc = wf.cmd_install_hooks(argparse.Namespace(repo=str(repo), force=True))
+        self.assertEqual(rc, wf.EXIT_OK)
+        cfg = wf.load_config(repo)
+        pre_commit_cmd = cfg["hooks"]["pre_commit"]
+        pre_push_cmd = cfg["hooks"]["pre_push"]
+        marker = "# dev-decisions hook — managed by dev-decisions install-hooks"
+        env_line = ('[ -f "$HOME/.config/dev-decisions/env" ] && '
+                    '{ set -a; . "$HOME/.config/dev-decisions/env"; set +a; }')
+        expected_commit = (
+            "#!/bin/sh\n" + marker + "\n"
+            "# Provider API keys (git hooks don't inherit your shell env). Create\n"
+            "# ~/.config/dev-decisions/env with `FASTINO_API_KEY=...` lines and\n"
+            "# install-hooks wires it into every hook it manages.\n"
+            + env_line + "\n"
+            + f'exec "$HOME/.local/bin/dev-decisions" {pre_commit_cmd} --trigger git-pre-commit\n'
+        )
+        expected_push = (
+            "#!/bin/sh\n" + marker + "\n"
+            "# Provider API keys (git hooks don't inherit your shell env). Create\n"
+            "# ~/.config/dev-decisions/env with `FASTINO_API_KEY=...` lines and\n"
+            "# install-hooks wires it into every hook it manages.\n"
+            + env_line + "\n"
+            + f'exec "$HOME/.local/bin/dev-decisions" {pre_push_cmd} --trigger git-pre-push\n'
+        )
+        got_commit = (repo / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+        got_push = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+        self.assertEqual(got_commit, expected_commit)
+        self.assertEqual(got_push, expected_push)
+
+    # ── C4: fixture pins + record-asr row + calibration join ───────────────────
+
+    def test_fixture_shas_pinned(self):
+        import hashlib
+        med = self._media
+        mp3 = med.FIXTURES_DIR / "nar-s1.mp3"
+        txt = med.FIXTURES_DIR / "nar-s1.txt"
+        self.assertEqual(hashlib.sha256(mp3.read_bytes()).hexdigest(),
+                         med.NAR_S1_MP3_SHA256)
+        self.assertEqual(hashlib.sha256(txt.read_bytes()).hexdigest(),
+                         med.NAR_S1_TXT_SHA256)
+
+    def test_record_asr_row_shape_and_calibration_join(self):
+        import argparse
+        import contextlib
+        import hashlib
+        import io
+        import devdec.gates as gates
+        med = self._media
+        truth = (med.FIXTURES_DIR / "nar-s1.txt").read_text(encoding="utf-8")
+        mp3 = med.FIXTURES_DIR / "nar-s1.mp3"
+
+        from types import SimpleNamespace
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": truth,
+                    "result": SimpleNamespace(provider="stepfun"), "error": None}
+
+        real_tc = med.media_transcribe
+        saved_gates_log = gates.LOG_DIR
+        gates.LOG_DIR = self._td / "logs"
+        med.media_transcribe = stub
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_record_asr(argparse.Namespace(fixtures=None))
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertIn("accuracy=1.000", out.getvalue())
+            rows = [json.loads(l) for l in med.FEEDBACK_FILE.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            self.assertEqual(r["task"], med.ASR_TASK)          # "asr_roundtrip"
+            self.assertEqual(r["head_id"], med.ASR_HEAD)       # "asr_faithful"
+            self.assertEqual(r["provider"], "gen1_raw/stepfun")
+            self.assertEqual(r["input_sha256"],
+                             hashlib.sha256(mp3.read_bytes()).hexdigest())
+            self.assertEqual(r["predicted"], "faithful")
+            self.assertEqual(r["actual"], "faithful")
+            self.assertEqual(r["predicted_confidence"], 1.0)
+            self.assertIn("label", r)
+            # the comparator is the same function the gate uses, not a copy
+            import inspect
+            gate_src = inspect.getsource(med.cmd_record_asr)
+            self.assertIn("compare_text(", gate_src)
+            self.assertNotIn("SequenceMatcher", gate_src)
+            self.assertNotIn("re.findall", gate_src)
+            # the calibration command joins the row back through its own reader
+            out2 = io.StringIO()
+            with contextlib.redirect_stdout(out2):
+                rc2 = gates.cmd_calibration(argparse.Namespace(
+                    min_rows=1, min_span=0.0, format="text"))
+            self.assertEqual(rc2, med.EXIT_OK)
+            joined = [l for l in out2.getvalue().splitlines() if "asr_roundtrip" in l]
+            self.assertTrue(joined, "calibration must join the asr_roundtrip group")
+            self.assertIn("asr_faithful", joined[0])
+            self.assertIn("gen1_raw/stepfun", joined[0])
+            self.assertIn("1.0", joined[0])
+        finally:
+            med.media_transcribe = real_tc
+            gates.LOG_DIR = saved_gates_log
+
+    # ── C5: telemetry parser ───────────────────────────────────────────────────
+
+    def test_record_media_runs_corrupt_named_and_idempotent(self):
+        import argparse
+        import contextlib
+        import io
+        import os
+        med = self._media
+        good1 = json.dumps({"input_sha256": "a" * 64, "input_chars": 5,
+                            "input_bytes": 5, "provider": "kokoro",
+                            "model": "kokoro-v1.0", "duration_seconds": 1.5,
+                            "request_id": None})
+        good2 = json.dumps({"input_sha256": "b" * 64, "input_chars": 6,
+                            "input_bytes": 6, "provider": "stepfun",
+                            "model": "stepaudio-2.5-asr", "duration_seconds": 5.825,
+                            "request_id": "req-1"})
+        sink = self._td / "telemetry.jsonl"
+        sink.write_text(good1 + "\n{corrupt json\n" + good1 + "\n" + good2 + "\n",
+                        encoding="utf-8")
+        os.environ["GEN1_TELEMETRY_FILE"] = str(sink)
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_record_media_runs(argparse.Namespace(telemetry=None))
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertIn("skipped line 2", out.getvalue())  # corrupt named, never fatal
+            _, rows = med.read_table(med.TABLES_DIR / med.MEDIA_RUNS_TABLE)
+            # the identical good1 line lands twice — distinct attempts, occurrence-keyed
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(rows[0]["duration_seconds"], "1.5")
+            self.assertTrue(rows[0]["recorded_at"])  # ingestion date stamps the band
+            out2 = io.StringIO()
+            with contextlib.redirect_stdout(out2):
+                rc2 = med.cmd_record_media_runs(argparse.Namespace(telemetry=None))
+            self.assertEqual(rc2, med.EXIT_OK)
+            self.assertIn("+ 0 new row(s)", out2.getvalue())
+            _, rows2 = med.read_table(med.TABLES_DIR / med.MEDIA_RUNS_TABLE)
+            self.assertEqual(len(rows2), 3)  # re-run lands nothing twice
+        finally:
+            os.environ.pop("GEN1_TELEMETRY_FILE", None)
+
+    # ── C6: media-budget both paths ────────────────────────────────────────────
+
+    def test_media_budget_band_path_and_degraded_path(self):
+        import argparse
+        import contextlib
+        import io
+        med = self._media
+        rows = []
+        for d in range(1, 6):
+            for prov, dur in (("kokoro", 30.0), ("stepfun", 60.0)):
+                rows.append({"recorded_at": f"2026-10-0{d}", "provider": prov,
+                             "model": "m", "duration_seconds": dur, "request_id": "r",
+                             "input_sha256": "x", "input_chars": 1, "input_bytes": 1,
+                             "line_sha": f"{prov}-{d}"})
+        for d in (1, 2):
+            rows.append({"recorded_at": f"2026-10-0{d}", "provider": "wan", "model": "m",
+                         "duration_seconds": 0.0, "request_id": "r", "input_sha256": "x",
+                         "input_chars": 1, "input_bytes": 1, "line_sha": f"wan-{d}"})
+        med.TABLES_DIR.mkdir(parents=True, exist_ok=True)
+        med.write_table(med.TABLES_DIR / med.MEDIA_RUNS_TABLE, med.MEDIA_RUNS_COLUMNS, rows)
+
+        calls = []
+        def fake_band(series, *, ahead=1, telemetry=None, task_id=None, table_name=None):
+            calls.append((list(series), task_id))
+            return {"ok": True,
+                    "points": [{"index": len(series), "median": 95.0, "lo": 80.0,
+                                "hi": 110.0, "actual": None}],
+                    "error": None}
+
+        def down(series, *, ahead=1, telemetry=None, task_id=None, table_name=None):
+            return {"ok": False, "points": [],
+                    "error": "sdm1 not importable — set DEV_DECISIONS_SDM1_PATH "
+                             "or install ~/Projects/sdm1"}
+
+        real_band = med.forecast_band
+        try:
+            med.forecast_band = fake_band
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=1000.0))
+            txt = out.getvalue()
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertIn("next-day band 80.0–110.0", txt)
+            self.assertEqual(len(calls), 2)  # wan too short — no band call, named skip
+            self.assertTrue(all(t == med.MEDIA_BUDGET_TASK for _, t in calls))
+            self.assertIn("forecast needs 4", txt)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=10.0))
+            self.assertEqual(rc, med.EXIT_WARN)  # 95+95 > 10 → advisory flag
+            self.assertIn("OVER", out.getvalue())
+
+            med.forecast_band = down  # sdm1 unavailable: recorded stats, no band
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=1000.0))
+            txt = out.getvalue()
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertNotIn("next-day band", txt)
+            self.assertIn("sdm1 not importable", txt)
+            self.assertIn("no fabricated band", txt)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=1.0))
+            self.assertEqual(rc, med.EXIT_WARN)  # degraded still flags mechanically
+
+            (med.TABLES_DIR / med.MEDIA_RUNS_TABLE).unlink()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=None))
+            self.assertEqual(rc, med.EXIT_ERROR)  # no table → named error, no crash
+        finally:
+            med.forecast_band = real_band
+
+    # ── C8: EVAL-ONLY help + config block pins ─────────────────────────────────
+
+    def test_eval_only_help_and_config_block(self):
+        import devdec.cli as cli
+        p = cli.build_parser()
+        sub = p._subparsers._group_actions[0]
+        helps = {a.dest: (a.help or "") for a in sub._choices_actions}
+        for name in ("media-gate", "media-speak", "media-imagine",
+                     "record-asr", "media-budget"):
+            self.assertTrue(helps.get(name, "").startswith("EVAL-ONLY"),
+                            (name, helps.get(name)))
+        for name in ("media-transcribe", "record-media-runs"):
+            self.assertFalse(helps.get(name, "").startswith("EVAL-ONLY"), name)
+        cfg = (_HERE.parent.parent / "config.example.toml").read_text(encoding="utf-8")
+        for needle in ("Media generation lane (gen1", "DEV_DECISIONS_GEN1_PATH",
+                       "~/.config/gen1/env", "gen1_raw/<leg>", "hooks never",
+                       "never BLOCK"):
+            self.assertIn(needle, cfg, needle)
+
+    def test_eval_only_tag_constant(self):
+        self.assertEqual(self._media.GEN1_RAW_TAG, "gen1_raw")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

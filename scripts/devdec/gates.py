@@ -1698,6 +1698,8 @@ _GATE_OP_TARGET_FIELD = {
     "fleet-anomaly": ("fleet-anomaly", "target"),
     "override-prior": ("override-prior", "target"),
     "risk-prior": ("risk-prior", "target"),
+    # media generation lane gate (2026-10-08 plan): target = script or request
+    "media-gate": ("media-gate", "target"),
 }
 
 

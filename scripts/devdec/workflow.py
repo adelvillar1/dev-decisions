@@ -993,6 +993,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"sem1:   not importable — semantic lane unavailable ({_sem1_reason})")
 
+    # gen1 library (media generation lane — batch-only, eval-only until
+    # calibrated): version plus per-provider key presence and reachability
+    # from gen1's own doctor probe. Presence only — no key value can reach
+    # this output (DoctorRow carries the variable name, never the value).
+    from .judgment import gen1 as _gen1
+    from .media import gen1_ready as _gen1_ready
+
+    _gen1_ok, _gen1_reason = _gen1_ready()
+    if _gen1 is not None:
+        try:
+            _gen1_version = _gen1.__version__
+        except Exception:
+            _gen1_version = "?"
+        print(f"gen1:   v{_gen1_version} ({_gen1_reason}; eval-only until calibrated)")
+        try:
+            for _row in _gen1.doctor():
+                _key = "key present " if _row.key_present else "NO KEY      "
+                print(f"        {_row.provider:<9} {_key}({_row.key_env}) "
+                      f"reachable={_row.reachable} — {_row.note}")
+        except Exception as e:
+            print(f"  gen1 doctor probe failed: {e}")
+    else:
+        print(f"gen1:   not importable — media lane unavailable ({_gen1_reason})")
+
     # config
     if CONFIG_FILE.exists():
         print(f"config: {CONFIG_FILE} ✓")

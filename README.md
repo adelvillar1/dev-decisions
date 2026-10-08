@@ -32,6 +32,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 | Eval only (not in active roster) | **ModernBERT** | Calibration comparison, kept available |
 | Tabular decisions (batch lane) | **TabPFN-3.5 hosted** (Prior Labs, via the sdm1 library) | Calibrated classification, quantile forecasts, and anomaly bands over tables — run histories, benchmark series, the calibration stores. Batch-only: ~minutes-scale small tasks, never in a hook path |
 | Semantic embeddings (batch lane) | **EmbeddingGemma-2 local** (native llama-server + sentence-transformers, via the sem1 library) | Geometry over the graded history — near-dupe recovery, nearest graded neighbors, gate shortlists. Eval-only (`sem1_raw`), batch-only, never in a hook path |
+| Media generation (batch lane) | **gen1 providers** (qwen → stepfun → kokoro speech cascade, stepfun ASR, wan images — via the gen1 library) | Renders what the work needs heard and seen, then verifies the round trip: script-vs-transcript agreement, ASR accuracy, recorded usage. Eval-only (`gen1_raw`), batch-only, never in a hook path |
 
 ### Candidate models (opt-in, via sys1 flags)
 
@@ -207,6 +208,36 @@ path references this lane (socket-guard test).
 | `semantic-dedup` | EVAL-ONLY near-dupe pairs (threshold 0.9) with each side's graded labels and disposition context | the vector index |
 | `semantic-nn --text/--file` | EVAL-ONLY nearest graded neighbors of a query, with labels and disposition pairing | the vector index |
 | `docs-gate --via-semantic` | EVAL-ONLY shortlist (default k=4) of doc sections per claim before the fan-out; verdict must equal the unshortlisted baseline | linked docs, embedded per run |
+
+## Media generation lane (gen1)
+
+The fourth model class: sys1 judges what the work **says**, the tabular lane
+scores what the work **measures**, the semantic lane indexes what the work
+**looks like**, and the media lane generates what the work needs **heard and
+seen**. It runs on the [gen1](https://github.com/adelvillar1/gen1) library
+(bootstrapped beside sys1, sdm1, and sem1): `speak` walks the cascade
+qwen → stepfun → kokoro (kokoro is the local floor) and names the leg that
+answered, `transcribe` is stepfun ASR, `imagine` is wan images.
+
+**Operating rule: media renders, the gates judge.** Nothing in `speak` or
+`imagine` feeds a verdict, a join, or a score — whether generated media is good
+stays with the owner. What is gradeable is the round trip: `media-gate`
+verifies rendered audio against its script with deterministic token agreement
+(WARN on any gap, never blocks) and `record-asr` grades the pinned fixture
+round-trip into the feedback store, so those verdicts can earn floors like
+every other judge. Rows carry `gen1_raw/<leg>` until calibrated, and the
+**batch-only rule** holds as in the other lanes: no hook path references this
+lane (socket-guard test).
+
+| Command | What it does | Evidence source |
+|---|---|---|
+| `media-gate` | Verify a rendered narration against its script — seam request + meta (`--project` resolves paths and refuses escapes) or a single `--script`/`--audio` pair; per-line agreement with missing/extra tokens named | one redacted log row (counts + sha256s, never transcript content) |
+| `media-transcribe` | Audio → text through gen1's ASR; transcript to stdout, one accountable row | log row + gen1 telemetry |
+| `media-speak` | Text → audio at `--out`; the cascade leg that answered lands in the row | log row + gen1 telemetry |
+| `media-imagine` | Prompt → images at `--out`, one file per image | log row + gen1 telemetry |
+| `record-asr` | Grade the pinned fixture round-trip with the gate's own comparator; per-provider accuracy rows the `calibration` command already joins | feedback store |
+| `record-media-runs` | gen1's telemetry JSONL → `tables/media_runs.csv` — one row per attempt including failed legs, occurrence-keyed so re-runs land nothing twice, corrupt lines skipped by name | the telemetry sink |
+| `media-budget` | sdm1 forecast band over recorded audio-seconds per provider vs a requested budget; sdm1 unavailable degrades to recorded stats with a named reason, never a fabricated band | the recorded table |
 
 ## UX corpus (ux-surface + ux-gate)
 
