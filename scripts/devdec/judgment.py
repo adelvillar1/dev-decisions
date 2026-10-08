@@ -153,6 +153,44 @@ def _bootstrap_sem1():
 
 sem1 = _bootstrap_sem1()
 
+
+def _bootstrap_gen1():
+    """Sibling bootstrap for the gen1 media-generation library (same layout
+    covenant as sys1/sdm1/sem1): env path, ~/Projects/gen1/src, then sibling
+    gen1/src under the script's parents."""
+    try:
+        import gen1  # type: ignore[import-not-found]
+        return gen1
+    except ImportError:
+        pass
+    candidates: list[Path] = []
+    env = os.environ.get("DEV_DECISIONS_GEN1_PATH")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.append(Path.home() / "Projects" / "gen1" / "src")
+    here = Path(__file__).resolve()
+    for parent in here.parents[:4]:
+        candidates.append(parent / "gen1" / "src")
+    for cand in candidates:
+        s = str(cand)
+        if not cand.is_dir():
+            continue
+        if s not in sys.path:
+            sys.path.insert(0, s)
+        try:
+            import gen1  # type: ignore[import-not-found]
+            return gen1
+        except ImportError:
+            try:
+                sys.path.remove(s)
+            except ValueError:
+                pass
+            continue
+    return None
+
+
+gen1 = _bootstrap_gen1()
+
 # --provider choices: dynamic from the sys1 registry, so candidate models
 # (clm, kev, tev1, decide_1b, ...) show up as soon as sys1 registers them —
 # plus the fan-out aliases and the sdm1 tabular lane (a dev-decisions-level
