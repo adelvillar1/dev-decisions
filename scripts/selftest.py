@@ -1451,6 +1451,397 @@ class TestGen1Lane(unittest.TestCase):
     def test_eval_only_tag_constant(self):
         self.assertEqual(self._media.GEN1_RAW_TAG, "gen1_raw")
 
+    # ── W0: --json machine mode — one row per line, the log row verbatim ──────
+
+    def test_media_verbs_accept_json_flag(self):
+        import devdec.cli as cli
+        p = cli.build_parser()
+        sub = p._subparsers._group_actions[0]
+        for name in ("media-gate", "media-transcribe", "media-speak",
+                     "media-imagine", "record-asr", "record-media-runs",
+                     "media-budget"):
+            dests = {a.dest for a in sub.choices[name]._actions}
+            self.assertIn("json", dests, name)
+
+    def _rows(self, text):
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def test_media_gate_json_row_is_the_log_row(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+        script = self._td / "s.txt"
+        script.write_text("alpha beta", encoding="utf-8")
+        audio = self._td / "a.bin"
+        audio.write_bytes(b"AUDIO")
+
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": "alpha beta",
+                    "result": SimpleNamespace(provider="stepfun"), "error": None}
+
+        real = med.media_transcribe
+        med.media_transcribe = stub
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_gate(self._gns(script=str(script),
+                                                  audio=str(audio), json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            rows = self._rows(out.getvalue())
+            self.assertEqual(len(rows), 1)  # machine mode: the row, no chatter
+            r = rows[0]
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["op"], "media-gate")
+            self.assertEqual(r["mode"], "single")
+            self.assertEqual(r["verdict"], "pass")
+            self.assertEqual(r["provider"], "gen1_raw/stepfun")
+            self.assertEqual(r["task"], "media_gate")
+            self.assertEqual(r["lines"], [{
+                "id": "s", "agreement": 1.0, "ref_tokens": 2, "got_tokens": 2,
+                "missing": 0, "extra": 0,
+                "audio_sha256": __import__("hashlib").sha256(b"AUDIO").hexdigest()}])
+            for key in ("input_sha256", "refused", "note"):
+                self.assertIn(key, r)
+            logged = [e for e in self._events() if e.get("op") == "media-gate"][-1]
+            self.assertEqual({k: v for k, v in r.items() if k != "ok"},
+                             {k: v for k, v in logged.items() if k != "ts"})
+        finally:
+            med.media_transcribe = real
+
+    def test_media_gate_json_refusal_row_on_stdout(self):
+        import contextlib
+        import io
+        med = self._media
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = med.cmd_media_gate(self._gns(json=True))  # no mode selected
+        self.assertEqual(rc, med.EXIT_ERROR)
+        rows = self._rows(out.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["ok"])
+        self.assertEqual(rows[0]["op"], "media-gate")
+        self.assertIn("usage", rows[0]["error"])
+        # a refusal is a row on stdout, never only stderr (039172e's lesson)
+        self.assertEqual([e for e in self._events() if e.get("op") == "media-gate"], [])
+
+    def test_media_gate_json_gaps_row_keeps_warn_exit(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+        script = self._td / "s.txt"
+        script.write_text("alpha beta gamma", encoding="utf-8")
+        audio = self._td / "a.bin"
+        audio.write_bytes(b"AUDIO")
+
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": "alpha beta",
+                    "result": SimpleNamespace(provider="stepfun"), "error": None}
+
+        real = med.media_transcribe
+        med.media_transcribe = stub
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_gate(self._gns(script=str(script),
+                                                  audio=str(audio), json=True))
+            self.assertEqual(rc, med.EXIT_WARN)  # gaps: WARN, never BLOCK
+            r = self._rows(out.getvalue())[0]
+            self.assertTrue(r["ok"])  # the command completed and logged
+            self.assertEqual(r["verdict"], "gaps")
+            self.assertEqual(r["lines"][0]["missing"], 1)
+        finally:
+            med.media_transcribe = real
+
+    def test_record_asr_json_rows_pinned(self):
+        import argparse
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+        truth = (med.FIXTURES_DIR / "nar-s1.txt").read_text(encoding="utf-8")
+
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": truth,
+                    "result": SimpleNamespace(provider="stepfun"), "error": None}
+
+        real = med.media_transcribe
+        med.media_transcribe = stub
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_record_asr(argparse.Namespace(fixtures=None, json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            rows = self._rows(out.getvalue())
+            self.assertEqual(len(rows), 2)  # one provider row + the summary
+            prow, summary = rows
+            self.assertTrue(prow["ok"])
+            self.assertEqual(prow["op"], "record-asr")
+            self.assertEqual(prow["provider"], "gen1_raw/stepfun")
+            self.assertEqual(prow["n"], 1)
+            self.assertEqual(prow["accuracy"], 1.0)
+            self.assertEqual(prow["mean_agreement"], 1.0)
+            self.assertTrue(summary["ok"])
+            self.assertEqual(summary["op"], "record-asr")
+            self.assertEqual(summary["rows"], 1)
+            # the graded row still lands in the feedback store
+            fb = [json.loads(line) for line in
+                  med.FEEDBACK_FILE.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(fb), 1)
+            self.assertEqual(fb[0]["task"], med.ASR_TASK)
+        finally:
+            med.media_transcribe = real
+
+    def test_record_media_runs_json_row_pinned(self):
+        import argparse
+        import contextlib
+        import io
+        import os
+        med = self._media
+        good = json.dumps({"input_sha256": "a" * 64, "input_chars": 5,
+                           "input_bytes": 5, "provider": "kokoro",
+                           "model": "kokoro-v1.0", "duration_seconds": 1.5,
+                           "request_id": None})
+        sink = self._td / "telemetry.jsonl"
+        sink.write_text(good + "\n{corrupt\n" + good + "\n", encoding="utf-8")
+        os.environ["GEN1_TELEMETRY_FILE"] = str(sink)
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_record_media_runs(argparse.Namespace(telemetry=None, json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            rows = self._rows(out.getvalue())
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["op"], "record-media-runs")
+            self.assertEqual(r["task"], "media_runs")
+            self.assertEqual(r["lines_total"], 3)
+            self.assertEqual(r["rows_new"], 2)   # occurrence-keyed: the repeat lands
+            self.assertEqual(r["rows_skipped"], 1)
+            self.assertEqual(r["verdict"], "ok")
+            self.assertEqual(r["provider"], "kokoro")
+            self.assertIn("input_sha256", r)
+            logged = [e for e in self._events() if e.get("op") == "record-media-runs"][-1]
+            self.assertEqual({k: v for k, v in r.items() if k != "ok"},
+                             {k: v for k, v in logged.items() if k != "ts"})
+        finally:
+            os.environ.pop("GEN1_TELEMETRY_FILE", None)
+
+    def test_media_budget_json_row_pinned(self):
+        import argparse
+        import contextlib
+        import io
+        med = self._media
+        rows = []
+        for d in range(1, 6):
+            rows.append({"recorded_at": f"2026-10-0{d}", "provider": "kokoro",
+                         "model": "m", "duration_seconds": 30.0, "request_id": "r",
+                         "input_sha256": "x", "input_chars": 1, "input_bytes": 1,
+                         "line_sha": f"k-{d}"})
+        med.TABLES_DIR.mkdir(parents=True, exist_ok=True)
+        med.write_table(med.TABLES_DIR / med.MEDIA_RUNS_TABLE, med.MEDIA_RUNS_COLUMNS, rows)
+
+        def fake_band(series, *, ahead=1, telemetry=None, task_id=None, table_name=None):
+            return {"ok": True,
+                    "points": [{"index": len(series), "median": 95.0, "lo": 80.0,
+                                "hi": 110.0, "actual": None}],
+                    "error": None}
+
+        real_band = med.forecast_band
+        try:
+            med.forecast_band = fake_band
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=1000.0, json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            r = self._rows(out.getvalue())[0]
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["op"], "media-budget")
+            self.assertEqual(r["task"], med.MEDIA_BUDGET_TASK)
+            self.assertEqual(r["bands"], {"kokoro": {"median": 95.0, "lo": 80.0, "hi": 110.0}})
+            self.assertEqual(r["estimate_total_s"], 95.0)
+            self.assertEqual(r["budget_s"], 1000.0)
+            self.assertEqual(r["degraded"], [])
+            self.assertEqual(r["verdict"], "pass")
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=10.0, json=True))
+            self.assertEqual(rc, med.EXIT_WARN)
+            r = self._rows(out.getvalue())[0]
+            self.assertEqual(r["verdict"], "over")  # advisory flag, row still lands
+
+            med.forecast_band = lambda *a, **k: {"ok": False, "points": [],
+                                                 "error": "sdm1 not importable"}
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_budget(argparse.Namespace(budget_seconds=None, json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            r = self._rows(out.getvalue())[0]
+            self.assertEqual(r["bands"], {})
+            self.assertTrue(r["degraded"])  # named degradation, no fabricated band
+        finally:
+            med.forecast_band = real_band
+
+    def test_media_speak_json_row_pinned(self):
+        import argparse
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+
+        def stub(text, **kw):
+            return {"ok": True, "audio": b"MP3BYTES",
+                    "result": SimpleNamespace(duration_seconds=1.25, format="mp3",
+                                              sample_rate=24000, voice="v",
+                                              request_id="req-9", provider="qwen"),
+                    "error": None}
+
+        def refuse(text, **kw):
+            return {"ok": False, "audio": None, "result": None,
+                    "error": "DASHSCOPE_API_KEY not set"}
+
+        real = med.media_speak
+        out_file = self._td / "out.mp3"
+        try:
+            med.media_speak = stub
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_speak(argparse.Namespace(
+                    text="hello", text_file=None, out=str(out_file), json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertEqual(out_file.read_bytes(), b"MP3BYTES")  # the render lands
+            r = self._rows(out.getvalue())[0]
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["op"], "media-speak")
+            self.assertEqual(r["task"], "media_speak")
+            self.assertEqual(r["provider"], "gen1_raw/qwen")
+            self.assertEqual(r["duration_seconds"], 1.25)
+            self.assertEqual(r["format"], "mp3")
+            self.assertEqual(r["sample_rate"], 24000)
+            self.assertEqual(r["request_id"], "req-9")
+            self.assertEqual(r["verdict"], "ok")
+            self.assertNotIn("hello", out.getvalue())  # rendered text never rows
+
+            med.media_speak = refuse
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_speak(argparse.Namespace(
+                    text="hello", text_file=None, out=str(self._td / "never.mp3"),
+                    json=True))
+            self.assertEqual(rc, med.EXIT_ERROR)
+            r = self._rows(out.getvalue())[0]
+            self.assertTrue(r["ok"])            # logged refusal: the row exists
+            self.assertEqual(r["verdict"], "refused")
+            self.assertEqual(r["provider"], med.GEN1_RAW_TAG)
+            self.assertFalse((self._td / "never.mp3").exists())
+        finally:
+            med.media_speak = real
+
+    def test_media_imagine_json_row_pinned(self):
+        import argparse
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+
+        def stub(prompt, **kw):
+            img = SimpleNamespace(mime="image/png", data=b"PNG", w=64, h=64)
+            return {"ok": True, "images": [img],
+                    "result": SimpleNamespace(images=[img], provider="wan",
+                                              telemetry=SimpleNamespace(request_id="req-w")),
+                    "error": None}
+
+        real = med.media_imagine
+        out_dir = self._td / "imgs"
+        try:
+            med.media_imagine = stub
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_imagine(argparse.Namespace(
+                    prompt="a cat", prompt_file=None, out=str(out_dir), json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            self.assertTrue((out_dir / "image-01.png").is_file())
+            r = self._rows(out.getvalue())[0]
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["op"], "media-imagine")
+            self.assertEqual(r["task"], "media_imagine")
+            self.assertEqual(r["provider"], "gen1_raw/wan")
+            self.assertEqual(r["images"], 1)
+            self.assertEqual(r["request_id"], "req-w")
+            self.assertEqual(r["verdict"], "ok")
+            self.assertNotIn("a cat", out.getvalue())  # the prompt never rows
+        finally:
+            med.media_imagine = real
+
+    def test_media_transcribe_json_row_carries_transcript_not_the_log(self):
+        import argparse
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+        audio = self._td / "a.bin"
+        audio.write_bytes(b"AUDIO")
+
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": "alpha beta delta",
+                    "result": SimpleNamespace(
+                        provider="stepfun", duration_seconds=2.5,
+                        telemetry=SimpleNamespace(request_id="req-t")),
+                    "error": None}
+
+        real = med.media_transcribe
+        med.media_transcribe = stub
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = med.cmd_media_transcribe(argparse.Namespace(audio=str(audio), json=True))
+            self.assertEqual(rc, med.EXIT_OK)
+            r = self._rows(out.getvalue())[0]
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["op"], "media-transcribe")
+            self.assertEqual(r["task"], "media_transcribe")
+            self.assertEqual(r["duration_seconds"], 2.5)
+            self.assertEqual(r["request_id"], "req-t")
+            self.assertEqual(r["transcript"], "alpha beta delta")  # the payload
+            logged = [e for e in self._events() if e.get("op") == "media-transcribe"][-1]
+            self.assertNotIn("transcript", logged)  # the log stays redacted
+            self.assertNotIn("alpha", json.dumps(logged))
+        finally:
+            med.media_transcribe = real
+
+    def test_machine_rows_are_json_lines_only(self):
+        """Machine mode prints JSON and nothing else — no human chatter that a
+        JSON-lines parser would have to skip (the semantic lane's idiom)."""
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        med = self._media
+        script = self._td / "s.txt"
+        script.write_text("alpha beta", encoding="utf-8")
+        audio = self._td / "a.bin"
+        audio.write_bytes(b"AUDIO")
+
+        def stub(audio_bytes, **kw):
+            return {"ok": True, "transcript": "alpha beta",
+                    "result": SimpleNamespace(provider="stepfun"), "error": None}
+
+        real = med.media_transcribe
+        med.media_transcribe = stub
+        try:
+            for ns in (self._gns(script=str(script), audio=str(audio), json=True),):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    med.cmd_media_gate(ns)
+                for line in out.getvalue().splitlines():
+                    if not line.strip():
+                        continue
+                    json.loads(line)  # every line parses, or this raises
+        finally:
+            med.media_transcribe = real
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

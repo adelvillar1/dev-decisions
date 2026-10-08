@@ -23,6 +23,13 @@ Operating rules (2026-10-08 plan):
 - Redacted rows: log rows carry agreement, token counts, and sha256s —
   never transcript content, never key material. gen1's telemetry sink is
   structurally redacted on its side; this module only reads it.
+- Machine mode (``--json`` on every media verb): one JSON object per line on
+  stdout, human chatter suppressed. ``ok`` is true whenever the command
+  completed and logged its accountable row — ``verdict`` carries the outcome
+  (ok/pass/gaps/over/refused/error); ``ok`` false marks a refusal before any
+  row existed (usage, unreadable input, no data) and ``error`` names it. The
+  machine rows are the log rows verbatim; media-transcribe alone adds its
+  transcript to the machine row, never to the log.
 
 gen1 is consumed contract-only (public surface speak/transcribe/imagine,
 probe/doctor, registry_names, the error taxonomy); this repo changes nothing
@@ -54,6 +61,24 @@ FEEDBACK_FILE = LOG_DIR / "feedback" / "feedback.jsonl"
 MEDIA_RUNS_TABLE = "media_runs.csv"
 # the in-repo round-trip fixtures (sha256s pinned in the selftest)
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "media"
+
+
+# ── machine mode (--json): one row per line on stdout ────────────────────────
+
+
+def _emit_json(row: dict) -> None:
+    print(json.dumps(row))
+
+
+def _refusal(machine: bool, op: str, message: str) -> int:
+    """One named refusal: the human words on stdout by default, or a JSON
+    refusal row in machine mode — on stdout, never stderr (the refusal that
+    only reaches stderr reads as an empty reason to a machine caller)."""
+    if machine:
+        _emit_json({"op": op, "ok": False, "error": message})
+    else:
+        print(message)
+    return EXIT_ERROR
 
 
 # ── C1: readiness probe ──────────────────────────────────────────────────────
@@ -233,15 +258,22 @@ def cmd_media_gate(args: argparse.Namespace) -> int:
 
     Advisory by design: WARN on any gap, EXIT_ERROR when nothing could be
     verified, and it can never block — the verdict rides an uncalibrated ASR
-    until record-asr accumulates the graded rows that earn floors."""
+    until record-asr accumulates the graded rows that earn floors. Under
+    ``--json`` the log row itself is the single stdout line."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     if args.request:
         if not args.meta or not args.project or args.script or args.audio:
-            print("usage: media-gate --request R --meta M --project P   (seam mode)")
-            return EXIT_ERROR
+            return _refusal(machine, "media-gate",
+                            "usage: media-gate --request R --meta M --project P   (seam mode)")
     elif not (args.script and args.audio):
-        print("usage: media-gate --script S --audio A   (single-file mode)")
-        print("   or: media-gate --request R --meta M --project P   (seam mode)")
-        return EXIT_ERROR
+        return _refusal(machine, "media-gate",
+                        "usage: media-gate --script S --audio A   (single-file mode)\n"
+                        "   or: media-gate --request R --meta M --project P   (seam mode)")
 
     notes: list[str] = []
     if args.request:
@@ -254,16 +286,14 @@ def cmd_media_gate(args: argparse.Namespace) -> int:
             script_text = script_path.read_text(encoding="utf-8")
             audio = Path(args.audio).read_bytes()
         except OSError as e:
-            print(f"media-gate: cannot read script/audio: {e}")
-            return EXIT_ERROR
+            return _refusal(machine, "media-gate", f"media-gate: cannot read script/audio: {e}")
         units = [{"id": script_path.stem or "script", "text": script_text, "audio": audio,
                   "audio_sha": hashlib.sha256(audio).hexdigest(), "error": None}]
         mode = "single"
         target = str(args.script)
 
     if not units:
-        print("media-gate: nothing to verify (empty request)")
-        return EXIT_ERROR
+        return _refusal(machine, "media-gate", "media-gate: nothing to verify (empty request)")
 
     language = getattr(args, "language", None)
     verified: list[dict] = []
@@ -286,40 +316,40 @@ def cmd_media_gate(args: argparse.Namespace) -> int:
                          "_missing_tokens": cmp_["missing_tokens"],
                          "_extra_tokens": cmp_["extra_tokens"]})
 
-    print(f"media-gate: {target} ({mode} mode, {'+'.join(sorted(legs)) or GEN1_RAW_TAG})")
+    say(f"media-gate: {target} ({mode} mode, {'+'.join(sorted(legs)) or GEN1_RAW_TAG})")
     by_id = {v["id"]: v for v in verified}
     for u in units:
         v = by_id.get(u["id"])
         if v is None:
             continue
         gap = "ok" if (v["missing"] == 0 and v["extra"] == 0) else "gaps"
-        print(f"  {u['id']}: agreement={v['agreement']:.3f} "
-              f"({v['ref_tokens']} script / {v['got_tokens']} transcript tokens) {gap}")
+        say(f"  {u['id']}: agreement={v['agreement']:.3f} "
+            f"({v['ref_tokens']} script / {v['got_tokens']} transcript tokens) {gap}")
         if v["_missing_tokens"]:
-            print(f"    missing: {' '.join(v['_missing_tokens'])}")
+            say(f"    missing: {' '.join(v['_missing_tokens'])}")
         if v["_extra_tokens"]:
-            print(f"    extra:   {' '.join(v['_extra_tokens'])}")
+            say(f"    extra:   {' '.join(v['_extra_tokens'])}")
     for r in refused:
-        print(f"  {r['id']}: refused — {r['error']}")
+        say(f"  {r['id']}: refused — {r['error']}")
     for note in notes:
-        print(f"  note: {note}")
+        say(f"  note: {note}")
 
     gap_lines = sum(1 for v in verified if v["missing"] or v["extra"])
     if not verified:
         verdict = "error"
-        print(f"media-gate: all {len(units)} line(s) refused — nothing verified")
+        say(f"media-gate: all {len(units)} line(s) refused — nothing verified")
         rc = EXIT_ERROR
     elif gap_lines or refused:
         verdict = "gaps"
-        print(f"media-gate: verdict gaps ({gap_lines} line(s) differ, {len(refused)} refused)"
-              " — advisory, never blocks")
+        say(f"media-gate: verdict gaps ({gap_lines} line(s) differ, {len(refused)} refused)"
+            " — advisory, never blocks")
         rc = EXIT_WARN
     else:
         verdict = "pass"
-        print(f"media-gate: verdict pass — all {len(verified)} line(s) match")
+        say(f"media-gate: verdict pass — all {len(verified)} line(s) match")
         rc = EXIT_OK
 
-    log_record({
+    row = {
         "op": "media-gate",
         "target": target,
         "provider": "+".join(sorted(legs)) or GEN1_RAW_TAG,
@@ -331,7 +361,10 @@ def cmd_media_gate(args: argparse.Namespace) -> int:
         "verdict": verdict,
         "escalated": False,
         "note": f"{len(verified)} verified, {len(refused)} refused, {gap_lines} with gaps",
-    })
+    }
+    if machine:
+        _emit_json({**row, "ok": True})
+    log_record(row)
     return rc
 
 
@@ -365,18 +398,26 @@ def cmd_record_asr(args: argparse.Namespace) -> int:
     against ground truth with C3's comparator — the same function, not a copy.
     Writes a feedback-store row keyed (task "asr_roundtrip", head
     "asr_faithful", provider "gen1_raw/<leg>") — the join key the calibration
-    command already reads — and prints the per-provider accuracy report."""
+    command already reads — and prints the per-provider accuracy report. Under
+    ``--json``: one row per graded provider ({provider, n, accuracy,
+    mean_agreement}) then a summary row ({rows})."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     fixtures_dir = Path(args.fixtures) if getattr(args, "fixtures", None) else FIXTURES_DIR
     pairs: list[tuple[Path, Path]] = []
     for audio in sorted(fixtures_dir.glob("*.mp3")):
         txt = audio.with_suffix(".txt")
         if not txt.is_file():
-            print(f"record-asr: {audio.name} has no ground-truth .txt — skipped")
+            say(f"record-asr: {audio.name} has no ground-truth .txt — skipped")
             continue
         pairs.append((audio, txt))
     if not pairs:
-        print(f"record-asr: no .mp3/.txt fixture pairs in {fixtures_dir}")
-        return EXIT_ERROR
+        return _refusal(machine, "record-asr",
+                        f"record-asr: no .mp3/.txt fixture pairs in {fixtures_dir}")
 
     rows: list[dict] = []
     for audio_path, txt_path in pairs:
@@ -384,11 +425,11 @@ def cmd_record_asr(args: argparse.Namespace) -> int:
             audio = audio_path.read_bytes()
             truth = txt_path.read_text(encoding="utf-8")
         except OSError as e:
-            print(f"record-asr: refused — {audio_path.name}: unreadable ({e})")
+            say(f"record-asr: refused — {audio_path.name}: unreadable ({e})")
             continue
         res = media_transcribe(audio)
         if not res.get("ok"):
-            print(f"record-asr: refused — {audio_path.name}: {res.get('error')}")
+            say(f"record-asr: refused — {audio_path.name}: {res.get('error')}")
             continue
         cmp_ = compare_text(truth, res.get("transcript") or "")
         rows.append({
@@ -408,22 +449,31 @@ def cmd_record_asr(args: argparse.Namespace) -> int:
 
     for row in rows:
         _append_feedback_row(row)
-        print(f"record-asr: {row['note']} → {row['provider']}")
+        say(f"record-asr: {row['note']} → {row['provider']}")
 
     groups: dict[str, list[dict]] = {}
     for row in rows:
         groups.setdefault(row["provider"], []).append(row)
-    print(f"record-asr: {len(rows)} graded row(s) → {FEEDBACK_FILE}")
+    say(f"record-asr: {len(rows)} graded row(s) → {FEEDBACK_FILE}")
+    provider_rows: list[dict] = []
     for tag in sorted(groups):
         group = groups[tag]
         n = len(group)
         correct = sum(1 for r in group if str(r["predicted"]) == str(r["actual"]))
         confs = [float(r["predicted_confidence"] or 0.0) for r in group]
-        print(f"  {tag}: n={n} accuracy={correct / n:.3f} "
-              f"mean_agreement={sum(confs) / n:.3f}")
+        say(f"  {tag}: n={n} accuracy={correct / n:.3f} "
+            f"mean_agreement={sum(confs) / n:.3f}")
+        provider_rows.append({"op": "record-asr", "provider": tag, "n": n,
+                              "accuracy": round(correct / n, 3),
+                              "mean_agreement": round(sum(confs) / n, 3)})
     if not rows:
-        print("record-asr: no graded rows — every fixture refused (keys missing?)")
-        return EXIT_ERROR
+        return _refusal(machine, "record-asr",
+                        "record-asr: no graded rows — every fixture refused (keys missing?)")
+    if machine:
+        for prow in provider_rows:
+            _emit_json({**prow, "ok": True})
+        _emit_json({"op": "record-asr", "ok": True, "rows": len(rows),
+                    "feedback_file": str(FEEDBACK_FILE)})
     return EXIT_OK
 
 
@@ -452,11 +502,18 @@ def cmd_record_media_runs(args: argparse.Namespace) -> int:
     included; a corrupt line is skipped by name, never fatal. The sink carries
     no timestamp, so each row is stamped with its ingestion date (UTC): run
     daily for honest daily bands. Idempotent — a line already ingested (matched
-    by its content sha) is a duplicate, not a second charge."""
+    by its content sha) is a duplicate, not a second charge. Under ``--json``
+    the log row is the single stdout line."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     path = _telemetry_path(getattr(args, "telemetry", None))
     if not path.is_file():
-        print(f"record-media-runs: no telemetry at {path} — run a speak/transcribe first")
-        return EXIT_ERROR
+        return _refusal(machine, "record-media-runs",
+                        f"record-media-runs: no telemetry at {path} — run a speak/transcribe first")
 
     _, existing = read_table(TABLES_DIR / MEDIA_RUNS_TABLE)
     seen = {str(r.get("line_sha", "")) for r in existing}
@@ -508,11 +565,11 @@ def cmd_record_media_runs(args: argparse.Namespace) -> int:
     if new_rows:
         write_table(TABLES_DIR / MEDIA_RUNS_TABLE, MEDIA_RUNS_COLUMNS, existing + new_rows)
 
-    print(f"record-media-runs: {total} line(s) parsed from {path}")
-    print(f"  + {len(new_rows)} new row(s) → {TABLES_DIR / MEDIA_RUNS_TABLE}"
-          + (f", {duplicates} duplicate(s) already ingested" if duplicates else ""))
+    say(f"record-media-runs: {total} line(s) parsed from {path}")
+    say(f"  + {len(new_rows)} new row(s) → {TABLES_DIR / MEDIA_RUNS_TABLE}"
+        + (f", {duplicates} duplicate(s) already ingested" if duplicates else ""))
     for s in skipped:
-        print(f"  - skipped {s}")
+        say(f"  - skipped {s}")
 
     if new_rows or duplicates:
         verdict = "ok"
@@ -520,9 +577,9 @@ def cmd_record_media_runs(args: argparse.Namespace) -> int:
     else:
         verdict = "error"
         rc = EXIT_ERROR
-        print("record-media-runs: nothing recorded" +
-              (" (every line corrupt)" if skipped else " (sink empty)"))
-    log_record({
+        say("record-media-runs: nothing recorded" +
+            (" (every line corrupt)" if skipped else " (sink empty)"))
+    row = {
         "op": "record-media-runs",
         "target": str(path),
         "provider": "+".join(sorted({r["provider"] for r in new_rows})) or "none",
@@ -534,7 +591,10 @@ def cmd_record_media_runs(args: argparse.Namespace) -> int:
         "rows_skipped": len(skipped),
         "verdict": verdict,
         "escalated": False,
-    })
+    }
+    if machine:
+        _emit_json({**row, "ok": True})
+    log_record(row)
     return rc
 
 
@@ -574,20 +634,27 @@ def cmd_media_budget(args: argparse.Namespace) -> int:
     forecast_band (task media_budget_forecast), compare the next-day estimate
     against a requested budget, and degrade to the recorded table with a named
     reason when sdm1 is unavailable or history is short — never a crash, never
-    a fabricated band. Batch-only (the tabular lesson)."""
+    a fabricated band. Batch-only (the tabular lesson). Under ``--json`` the
+    log row is the single stdout line."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     table_path = TABLES_DIR / MEDIA_RUNS_TABLE
     if not table_path.is_file():
-        print(f"media-budget: no {MEDIA_RUNS_TABLE} at {TABLES_DIR} — run record-media-runs first")
-        return EXIT_ERROR
+        return _refusal(machine, "media-budget",
+                        f"media-budget: no {MEDIA_RUNS_TABLE} at {TABLES_DIR} — run record-media-runs first")
     _, rows = read_table(table_path)
     if not rows:
-        print(f"media-budget: {MEDIA_RUNS_TABLE} is empty — run record-media-runs first")
-        return EXIT_ERROR
+        return _refusal(machine, "media-budget",
+                        f"media-budget: {MEDIA_RUNS_TABLE} is empty — run record-media-runs first")
 
     budget = getattr(args, "budget_seconds", None)
     series = _daily_series(rows)
-    print(f"media-budget: {len(rows)} recorded run(s) across {len(series)} provider(s)"
-          f" — {table_path}")
+    say(f"media-budget: {len(rows)} recorded run(s) across {len(series)} provider(s)"
+        f" — {table_path}")
     bands: dict[str, dict] = {}
     degraded: list[str] = []
     estimate_total = 0.0
@@ -599,9 +666,9 @@ def cmd_media_budget(args: argparse.Namespace) -> int:
             degraded.append(f"{provider}: {reason}")
             estimate_total += values[-1]
             stats = _recorded_stats(days, values)
-            print(f"  {provider}: mean {stats['mean_daily']:.1f}s/day over "
-                  f"{stats['days']} day(s), latest {stats['latest_day']} "
-                  f"{stats['latest']:.1f}s — no band ({reason})")
+            say(f"  {provider}: mean {stats['mean_daily']:.1f}s/day over "
+                f"{stats['days']} day(s), latest {stats['latest_day']} "
+                f"{stats['latest']:.1f}s — no band ({reason})")
             continue
         result = forecast_band(values, ahead=1, task_id=MEDIA_BUDGET_TASK)
         points = result.get("points") or []
@@ -610,28 +677,28 @@ def cmd_media_budget(args: argparse.Namespace) -> int:
             degraded.append(f"{provider}: {reason}")
             estimate_total += values[-1]
             stats = _recorded_stats(days, values)
-            print(f"  {provider}: forecast declined — {reason}; recorded mean "
-                  f"{stats['mean_daily']:.1f}s/day over {stats['days']} day(s) "
-                  f"shown instead")
+            say(f"  {provider}: forecast declined — {reason}; recorded mean "
+                f"{stats['mean_daily']:.1f}s/day over {stats['days']} day(s) "
+                f"shown instead")
             continue
         pt = points[0]
         bands[provider] = pt
         estimate_total += float(pt["median"])
-        print(f"  {provider}: next-day band {pt['lo']:.1f}–{pt['hi']:.1f}s "
-              f"(median {pt['median']:.1f}s) from {len(values)} days")
+        say(f"  {provider}: next-day band {pt['lo']:.1f}–{pt['hi']:.1f}s "
+            f"(median {pt['median']:.1f}s) from {len(values)} days")
 
     verdict = "pass"
     if budget is not None:
         over = estimate_total > float(budget)
         verdict = "over" if over else "pass"
-        print(f"  budget: next-day estimate {estimate_total:.1f}s vs "
-              f"{float(budget):.1f}s → {'OVER' if over else 'within'}")
+        say(f"  budget: next-day estimate {estimate_total:.1f}s vs "
+            f"{float(budget):.1f}s → {'OVER' if over else 'within'}")
     if degraded:
-        print("  degraded (recorded stats shown, no fabricated band):")
+        say("  degraded (recorded stats shown, no fabricated band):")
         for reason in degraded:
-            print(f"    - {reason}")
+            say(f"    - {reason}")
 
-    log_record({
+    row = {
         "op": "media-budget",
         "target": str(table_path),
         "provider": "+".join(sorted(bands)) or "none",
@@ -645,7 +712,10 @@ def cmd_media_budget(args: argparse.Namespace) -> int:
         "degraded": degraded,
         "verdict": verdict,
         "escalated": verdict == "over",
-    })
+    }
+    if machine:
+        _emit_json({**row, "ok": True})
+    log_record(row)
     return EXIT_WARN if verdict == "over" else EXIT_OK
 
 
@@ -654,47 +724,65 @@ def cmd_media_budget(args: argparse.Namespace) -> int:
 
 def cmd_media_transcribe(args: argparse.Namespace) -> int:
     """Transcribe one audio file through gen1. The transcript goes to stdout;
-    the log row carries counts and identifiers, never content."""
+    the log row carries counts and identifiers, never content. Under
+    ``--json`` the machine row carries the transcript alongside the log row's
+    identifiers — the one verb whose payload belongs on stdout."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     try:
         audio = Path(args.audio).read_bytes()
     except OSError as e:
-        print(f"media-transcribe: cannot read {args.audio}: {e}")
-        return EXIT_ERROR
+        return _refusal(machine, "media-transcribe", f"media-transcribe: cannot read {args.audio}: {e}")
     res = media_transcribe(audio, language=getattr(args, "language", None),
                            provider=getattr(args, "provider", None))
     if not res.get("ok"):
-        print(f"media-transcribe: refused — {res.get('error')}")
-        log_record({"op": "media-transcribe", "target": str(args.audio),
-                    "provider": GEN1_RAW_TAG, "task": "media_transcribe",
-                    "input_sha256": hashlib.sha256(audio).hexdigest(),
-                    "verdict": "refused", "escalated": False})
+        say(f"media-transcribe: refused — {res.get('error')}")
+        row = {"op": "media-transcribe", "target": str(args.audio),
+               "provider": GEN1_RAW_TAG, "task": "media_transcribe",
+               "input_sha256": hashlib.sha256(audio).hexdigest(),
+               "verdict": "refused", "escalated": False}
+        if machine:
+            _emit_json({**row, "ok": True})
+        log_record(row)
         return EXIT_ERROR
     result = res.get("result")
-    print(res.get("transcript") or "")
-    log_record({"op": "media-transcribe", "target": str(args.audio),
-                "provider": leg_tag(result), "task": "media_transcribe",
-                "input_sha256": hashlib.sha256(audio).hexdigest(),
-                "duration_seconds": getattr(result, "duration_seconds", None),
-                "request_id": (result.telemetry.request_id if result.telemetry else None),
-                "verdict": "ok", "escalated": False})
+    say(res.get("transcript") or "")
+    row = {"op": "media-transcribe", "target": str(args.audio),
+           "provider": leg_tag(result), "task": "media_transcribe",
+           "input_sha256": hashlib.sha256(audio).hexdigest(),
+           "duration_seconds": getattr(result, "duration_seconds", None),
+           "request_id": (result.telemetry.request_id if result.telemetry else None),
+           "verdict": "ok", "escalated": False}
+    if machine:
+        _emit_json({**row, "ok": True, "transcript": res.get("transcript") or ""})
+    log_record(row)
     return EXIT_OK
 
 
 def cmd_media_speak(args: argparse.Namespace) -> int:
     """Render text to speech through gen1 into --out. One accountable log row
     (provider, duration measured from the returned bytes, request_id) — the
-    render itself is never judged."""
+    render itself is never judged. Under ``--json`` the log row is the single
+    stdout line."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     if bool(args.text) == bool(args.text_file):
-        print("usage: media-speak (--text T | --text-file F) --out FILE")
-        return EXIT_ERROR
+        return _refusal(machine, "media-speak",
+                        "usage: media-speak (--text T | --text-file F) --out FILE")
     try:
         text = args.text if args.text else Path(args.text_file).read_text(encoding="utf-8")
     except OSError as e:
-        print(f"media-speak: cannot read --text-file: {e}")
-        return EXIT_ERROR
+        return _refusal(machine, "media-speak", f"media-speak: cannot read --text-file: {e}")
     if not text.strip():
-        print("media-speak: empty text — nothing to render")
-        return EXIT_ERROR
+        return _refusal(machine, "media-speak", "media-speak: empty text — nothing to render")
     res = media_speak(text, voice=getattr(args, "voice", None),
                       language=getattr(args, "language", "en") or "en",
                       format=getattr(args, "format", None),
@@ -702,11 +790,14 @@ def cmd_media_speak(args: argparse.Namespace) -> int:
                       speed=getattr(args, "speed", None),
                       instruction=getattr(args, "instruction", None))
     if not res.get("ok"):
-        print(f"media-speak: refused — {res.get('error')}")
-        log_record({"op": "media-speak", "target": str(args.out),
-                    "provider": GEN1_RAW_TAG, "task": "media_speak",
-                    "input_sha256": _sha16(text), "verdict": "refused",
-                    "escalated": False})
+        say(f"media-speak: refused — {res.get('error')}")
+        row = {"op": "media-speak", "target": str(args.out),
+               "provider": GEN1_RAW_TAG, "task": "media_speak",
+               "input_sha256": _sha16(text), "verdict": "refused",
+               "escalated": False}
+        if machine:
+            _emit_json({**row, "ok": True})
+        log_record(row)
         return EXIT_ERROR
     result = res.get("result")
     out = Path(args.out)
@@ -714,43 +805,53 @@ def cmd_media_speak(args: argparse.Namespace) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(res.get("audio") or b"")
     except OSError as e:
-        print(f"media-speak: cannot write {out}: {e}")
-        return EXIT_ERROR
-    print(f"media-speak: {out} — {result.duration_seconds:.2f}s "
-          f"{result.format} @{result.sample_rate}Hz, voice={result.voice}")
-    log_record({"op": "media-speak", "target": str(out),
-                "provider": leg_tag(result), "task": "media_speak",
-                "input_sha256": _sha16(text),
-                "duration_seconds": result.duration_seconds,
-                "format": result.format, "sample_rate": result.sample_rate,
-                "request_id": result.request_id,
-                "verdict": "ok", "escalated": False})
+        return _refusal(machine, "media-speak", f"media-speak: cannot write {out}: {e}")
+    say(f"media-speak: {out} — {result.duration_seconds:.2f}s "
+        f"{result.format} @{result.sample_rate}Hz, voice={result.voice}")
+    row = {"op": "media-speak", "target": str(out),
+           "provider": leg_tag(result), "task": "media_speak",
+           "input_sha256": _sha16(text),
+           "duration_seconds": result.duration_seconds,
+           "format": result.format, "sample_rate": result.sample_rate,
+           "request_id": result.request_id,
+           "verdict": "ok", "escalated": False}
+    log_record(row)
+    if machine:
+        _emit_json({**row, "ok": True})
     return EXIT_OK
 
 
 def cmd_media_imagine(args: argparse.Namespace) -> int:
     """Render image(s) through gen1 into --out. One accountable log row — the
-    render itself is never judged."""
+    render itself is never judged. Under ``--json`` the log row is the single
+    stdout line."""
+    machine = bool(getattr(args, "json", False))
+
+    def say(message: str = "") -> None:
+        if not machine:
+            print(message)
+
     if bool(args.prompt) == bool(args.prompt_file):
-        print("usage: media-imagine (--prompt P | --prompt-file F) --out DIR")
-        return EXIT_ERROR
+        return _refusal(machine, "media-imagine",
+                        "usage: media-imagine (--prompt P | --prompt-file F) --out DIR")
     try:
         prompt = args.prompt if args.prompt else Path(args.prompt_file).read_text(encoding="utf-8")
     except OSError as e:
-        print(f"media-imagine: cannot read --prompt-file: {e}")
-        return EXIT_ERROR
+        return _refusal(machine, "media-imagine", f"media-imagine: cannot read --prompt-file: {e}")
     if not prompt.strip():
-        print("media-imagine: empty prompt — nothing to render")
-        return EXIT_ERROR
+        return _refusal(machine, "media-imagine", "media-imagine: empty prompt — nothing to render")
     res = media_imagine(prompt, aspect_ratio=getattr(args, "aspect_ratio", "1:1") or "1:1",
                         n=getattr(args, "n", 1) or 1,
                         provider=getattr(args, "provider", None))
     if not res.get("ok"):
-        print(f"media-imagine: refused — {res.get('error')}")
-        log_record({"op": "media-imagine", "target": str(args.out),
-                    "provider": GEN1_RAW_TAG, "task": "media_imagine",
-                    "input_sha256": _sha16(prompt), "verdict": "refused",
-                    "escalated": False})
+        say(f"media-imagine: refused — {res.get('error')}")
+        row = {"op": "media-imagine", "target": str(args.out),
+               "provider": GEN1_RAW_TAG, "task": "media_imagine",
+               "input_sha256": _sha16(prompt), "verdict": "refused",
+               "escalated": False}
+        if machine:
+            _emit_json({**row, "ok": True})
+        log_record(row)
         return EXIT_ERROR
     result = res.get("result")
     out_dir = Path(args.out)
@@ -762,14 +863,16 @@ def cmd_media_imagine(args: argparse.Namespace) -> int:
             dest.write_bytes(img.data)
             written.append(f"{dest} ({img.w}x{img.h})")
     except OSError as e:
-        print(f"media-imagine: cannot write into {out_dir}: {e}")
-        return EXIT_ERROR
+        return _refusal(machine, "media-imagine", f"media-imagine: cannot write into {out_dir}: {e}")
     for w in written:
-        print(f"media-imagine: {w}")
-    log_record({"op": "media-imagine", "target": str(out_dir),
-                "provider": leg_tag(result), "task": "media_imagine",
-                "input_sha256": _sha16(prompt),
-                "images": len(result.images),
-                "request_id": (result.telemetry.request_id if result.telemetry else None),
-                "verdict": "ok", "escalated": False})
+        say(f"media-imagine: {w}")
+    row = {"op": "media-imagine", "target": str(out_dir),
+           "provider": leg_tag(result), "task": "media_imagine",
+           "input_sha256": _sha16(prompt),
+           "images": len(result.images),
+           "request_id": (result.telemetry.request_id if result.telemetry else None),
+           "verdict": "ok", "escalated": False}
+    log_record(row)
+    if machine:
+        _emit_json({**row, "ok": True})
     return EXIT_OK

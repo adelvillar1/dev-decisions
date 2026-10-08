@@ -388,6 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--meta", default=None, help="audio_meta.json (seam mode)")
     sp.add_argument("--project", default=None, help="Render project dir that audio paths resolve against (seam mode)")
     sp.add_argument("--language", default=None, help="Language hint for the ASR leg")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_media_gate)
 
     sp = sub.add_parser("media-transcribe",
@@ -395,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--audio", required=True, help="Audio file to transcribe")
     sp.add_argument("--language", default=None, help="Language hint")
     sp.add_argument("--provider", default=None, help="Force one gen1 provider")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout (transcript included)")
     sp.set_defaults(func=cmd_media_transcribe)
 
     sp = sub.add_parser("media-speak",
@@ -408,6 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--speed", type=float, default=None, help="Speech rate multiplier")
     sp.add_argument("--instruction", default=None, help="Delivery instruction (providers that support it)")
     sp.add_argument("--provider", default=None, help="Force one gen1 provider")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_media_speak)
 
     sp = sub.add_parser("media-imagine",
@@ -418,21 +421,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--aspect-ratio", default="1:1", help="Aspect ratio (default: 1:1)")
     sp.add_argument("--n", type=int, default=1, help="Images to render (default: 1)")
     sp.add_argument("--provider", default=None, help="Force one gen1 provider")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_media_imagine)
 
     sp = sub.add_parser("record-asr",
                         help="EVAL-ONLY: round-trip the pinned ASR fixture into the feedback store (per-provider accuracy)")
     sp.add_argument("--fixtures", default=None, help="Fixture dir with .mp3/.txt pairs (default: scripts/fixtures/media)")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_record_asr)
 
     sp = sub.add_parser("record-media-runs",
                         help="Ingest gen1 telemetry into the media-seconds table (parse only; no model)")
     sp.add_argument("--telemetry", default=None, help="Telemetry JSONL path (default: GEN1_TELEMETRY_FILE or ~/.config/gen1/telemetry.jsonl)")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_record_media_runs)
 
     sp = sub.add_parser("media-budget",
                         help="EVAL-ONLY: forecast daily media-seconds bands per provider and compare to a budget (sdm1)")
     sp.add_argument("--budget-seconds", type=float, default=None, help="Next-day media-seconds budget (flag when the estimate exceeds it)")
+    sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_media_budget)
 
     # config
