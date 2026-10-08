@@ -447,3 +447,31 @@ same disposition/calibration loop, EVAL-ONLY until floors exist.
   model store), and `semantic-index --inputs <dir>` (file-directory indexing:
   extension-routed text→llama-server, images→st-worker; idempotent per content
   sha and accumulates across runs; a corpus name must be a filesystem slug).
+
+## Media generation lane (gen1)
+
+The fourth model class: what the work needs **heard and seen** — speech, audio
+transcripts, and images through three provider-abstracted verbs, verified the
+way every other lane verifies (redacted rows, calibration joins, advisory
+gates). Same JSONL, same disposition/calibration loop.
+
+- **Provider**: the `gen1` library (bootstrapped beside sys1/sdm1/sem1:
+  `~/Projects/gen1/src` or `DEV_DECISIONS_GEN1_PATH`), v0.1.0. `speak` walks
+  the cascade qwen → stepfun → kokoro (kokoro the local floor) and names the
+  answering leg; `transcribe` is stepfun ASR; `imagine` is wan images. Keys
+  `DASHSCOPE_API_KEY` / `STEPFUN_API_KEY` come from the env or
+  `~/.config/gen1/env` — recorded, never moved.
+- **Operating rule**: media renders, the gates judge — generation feeds no
+  verdict, join, or score. `media-gate` verifies rendered audio against its
+  script with deterministic token agreement (advisory: WARN on any gap, never
+  blocks; a path escaping `--project` is refused by name) and `record-asr`
+  grades the pinned fixture round-trip into the feedback store.
+- **Batch-only + eval-only**: rows tagged `gen1_raw/<leg>` until floors exist;
+  no hook path references this lane (socket-guard + hook-source tests).
+- **Commands**: `media-gate` (seam or single-file verification),
+  `media-transcribe`, `media-speak`, `media-imagine` (one accountable row per
+  call), `record-asr` (per-provider accuracy the `calibration` command joins),
+  `record-media-runs` (telemetry JSONL → `tables/media_runs.csv`,
+  occurrence-keyed, idempotent, corrupt lines skipped by name),
+  `media-budget` (sdm1 forecast band over recorded audio-seconds vs a budget;
+  degrades with a named reason, never a fabricated band).
