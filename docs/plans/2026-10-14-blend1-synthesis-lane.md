@@ -2,7 +2,7 @@
 
 ```yaml
 ---
-status: draft
+status: completed
 created: 2026-10-14
 updated: 2026-10-14
 slug: blend1-synthesis-lane
@@ -125,28 +125,32 @@ scores.
 
 ## Acceptance Criteria
 
-- [ ] **AC1** — offline: `explain` with an artifact whose sha256 matches the
+- [x] **AC1** — offline: `explain` with an artifact whose sha256 matches the
   gate row's `input_sha256` writes
   `logs/feedback/explanations/<sha>.md` and appends an `op: "explain"` row
   carrying `explanation_sha256`, `explanation_chars`, the `blend1_raw` tag,
   and the linked `input_sha256` (pytest, stubbed blend1).
-- [ ] **AC2** — offline: artifact hash mismatch → named refusal, no ask, no
+- [x] **AC2** — offline: artifact hash mismatch → named refusal, no ask, no
   row (pytest).
-- [ ] **AC3** — offline: missing blend1 import → fail-open error naming
-  `pip install -e ~/Projects/blend1` (pytest).
-- [ ] **AC4** — offline: a unit test proves no verdict-applying or blocking
+- [x] **AC3** — offline: missing blend1 import → fail-open naming the
+  working install path (blend1's venv or `uv sync` — a bare `pip install -e`
+  cannot resolve the path deps) (pytest).
+- [x] **AC4** — offline: a unit test proves no verdict-applying or blocking
   path is reachable from an explanation row (pytest).
-- [ ] **AC5** — offline: socket-guard test proves only `blend1`/`synthesis`
+- [x] **AC5** — offline: socket-guard test proves only blend1/synthesis
   code paths import blend1, and grep over the hook paths shows no synthesis
   references — hooks byte-identical (pytest + grep).
-- [ ] **AC6** — offline: `synthesis-budget` over fixture rows reports ask
+- [x] **AC6** — offline: `synthesis-budget` over fixture rows reports ask
   counts + estimated spend (pytest).
-- [ ] **AC7** — live: `dev-decisions explain --artifact <a real judged
+- [x] **AC7** — live: `dev-decisions explain --artifact <a real judged
   artifact> --row <sha>` on a real gate row produces a validated
-  explanation file; the ask's gate outcome rides in the row (parent-run —
-  ~$0.002).
-- [ ] **AC8** — `pytest` green (existing + new) and docs updated per Phase
-  3 item 5 (grep `blend1` in README/SKILL.md).
+  explanation file; the ask's gate outcome rides in the row. **VERIFIED
+  2026-10-14** — media-gate row `883166ae34115800` +
+  `scripts/fixtures/media/nar-s1.txt`: validation passed (atq 0.908,
+  contra 0.259, numbers ok), 1,105 chars, $0.00177, 11.1 s; the row landed
+  in the real log and `synthesis-budget` reads it.
+- [x] **AC8** — `pytest` green (110: 91 pre-existing + 19 new) and docs
+  updated per Phase 3 item 5 (grep `blend1` in README/SKILL.md).
 
 ## Files to be Touched
 
@@ -179,13 +183,15 @@ scores.
 ## Verification
 
 ```bash
-# offline gate (implementer)
-python -m pytest tests/ -q            # existing + new synthesis tests
-python scripts/dev_decisions.py explain --artifact docs/plans/2026-10-07-semantic-embeddings-lane.md --dry-run
-python scripts/dev_decisions.py synthesis-budget
-# live (parent)
-python scripts/dev_decisions.py explain --artifact <real judged artifact> --row <gate input_sha256>
-cat ~/.local/share/dev-decisions/logs/feedback/explanations/<sha>.md
+# offline gate
+python3 -m pytest scripts/selftest.py -q    # the suite lives in scripts/, not tests/
+python3 scripts/dev_decisions.py explain --artifact docs/plans/2026-10-07-semantic-embeddings-lane.md --dry-run
+python3 scripts/dev_decisions.py synthesis-budget
+# live — run under blend1's venv (the siblings are path deps; a bare
+# `pip install -e` cannot resolve them)
+~/Projects/blend1/.venv/bin/python scripts/dev_decisions.py explain \
+  --artifact scripts/fixtures/media/nar-s1.txt --row 883166ae34115800
+cat ~/.local/share/dev-decisions/logs/feedback/explanations/883166ae34115800.md
 ```
 
 Expected: dry-run resolves + hashes with no spend; the live run writes the
@@ -206,6 +212,7 @@ are byte-identical (socket-guard + grep).
 
 | Risk | Mitigation |
 |---|---|
+| Prompt injection via the judged artifact (diffs/plans carry arbitrary text) | The artifact lands between explicit data markers framed as never-instructions — the user-turn counterpart of blend1's S2 stance for fetched web sources; blast radius is eval-only (prose → local `.md`, gates nothing); pr-gate (the third-party-diff gate) has 0 rows today |
 | Synthesis spend in an eval loop (~$0.0015/ask) | Eval-only + `synthesis-budget` visibility; `--dry-run` rehearses spend-free; direct-path asks cost $0 when d1 routes low |
 | Explaining a drifted artifact (the file changed since the gate judged it) | Hash gate: mismatch → named refusal (AC2); the row links by `input_sha256` |
 | Explanation hallucination | blend1's GLiDE gate rates every answer before it ships; `blend1_raw` tag + eval-only until floors; the explanation never gates anything itself (AC4) |
