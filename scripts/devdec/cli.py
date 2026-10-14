@@ -453,7 +453,8 @@ def build_parser() -> argparse.ArgumentParser:
     selector.add_argument("--row", default=None,
                           help="Gate row selector: the row's input_sha256 (prefix or full digest)")
     selector.add_argument("--last-failed", dest="last_failed", action="store_true",
-                          help="Gate row selector: the most recent row with a failed/inconclusive verdict")
+                          help="Gate row selector: the most recent gate row whose verdict is not a pass "
+                               "(block/warn/gaps/drift/escalated/… — broader than failed)")
     selector.add_argument("--date", default=None,
                           help="Gate row selector: every distinct gate artifact logged on YYYY-MM-DD (UTC)")
     sp.add_argument("--dry-run", action="store_true",

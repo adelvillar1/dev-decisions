@@ -484,9 +484,10 @@ verdict means and what the author should change, riding in the JSONL beside
 the verdict, keyed by `input_sha256`. The calibration dataset upgrades from
 scores to readable causes. Same JSONL, same disposition/calibration loop.
 
-- **Provider**: the `blend1` library (installed into the ambient python:
-  `pip install -e ~/Projects/blend1`; the `web` extra optional — gate
-  explanations route direct). One `ask()` — d1 route gate → parallel fact
+- **Provider**: the `blend1` library (run this command under blend1's venv,
+  `~/Projects/blend1/.venv/bin/python`, or `uv sync` in `~/Projects/blend1` —
+  a bare `pip install -e` cannot resolve the sys1/sem1/sdm1 path deps; the
+  `web` extra optional). One `ask()` — d1 route gate → parallel fact
   lanes → LFM2.5-24B synthesis → GLiDE validation gate; facts are givens,
   never invented. A missing import fails open naming the install.
 - **Operating rule**: blend1 proposes prose, the gate disposes — rows tagged
