@@ -475,3 +475,32 @@ gates). Same JSONL, same disposition/calibration loop.
   occurrence-keyed, idempotent, corrupt lines skipped by name),
   `media-budget` (sdm1 forecast band over recorded audio-seconds vs a budget;
   degrades with a named reason, never a fabricated band).
+
+## Synthesis lane (blend1)
+
+The fifth model class: the composed answer. Every verdict-emitting gate
+gains a second beat — a synthesized, validated explanation of what the
+verdict means and what the author should change, riding in the JSONL beside
+the verdict, keyed by `input_sha256`. The calibration dataset upgrades from
+scores to readable causes. Same JSONL, same disposition/calibration loop.
+
+- **Provider**: the `blend1` library (installed into the ambient python:
+  `pip install -e ~/Projects/blend1`; the `web` extra optional — gate
+  explanations route direct). One `ask()` — d1 route gate → parallel fact
+  lanes → LFM2.5-24B synthesis → GLiDE validation gate; facts are givens,
+  never invented. A missing import fails open naming the install.
+- **Operating rule**: blend1 proposes prose, the gate disposes — rows tagged
+  `blend1_raw` in `providers_used`; nothing here gates, blocks, or joins, and
+  the gate's verdict stands exactly as recorded. Artifact integrity:
+  `--artifact` is hashed against the row's `input_sha256` and a drift is a
+  named refusal, never a guess.
+- **Batch-only + eval-only**: no hook path references this lane
+  (socket-guard test); `explain` spends synthesis tokens per ask (~$0.0015
+  synthesized, ~$0 direct-path) — `--dry-run` rehearses spend-free.
+- **Commands**: `explain --artifact PATH (--row SHA | --last-failed |
+  --date YYYY-MM-DD) [--dry-run]` — the explanation text lands at
+  `logs/feedback/explanations/<sha>.md` and never enters the redacted JSONL;
+  the row carries `explanation_sha256`, `explanation_chars`, the ask's
+  route/validation telemetry, cost, and latency. `synthesis-budget` — ask
+  counts + estimated spend from the `blend1_raw` rows, per-op breakdown,
+  first/last ts, prints JSON.

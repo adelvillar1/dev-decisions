@@ -28,6 +28,7 @@ from .corpora import cmd_changelog, cmd_triage_issues, cmd_uc_gate, cmd_ux_gate,
 from .tabular import cmd_budget_gate, cmd_fleet_anomaly, cmd_history_gate, cmd_override_prior, cmd_record_bench, cmd_record_runs, cmd_risk_prior
 from .semantics import cmd_semantic_dedup, cmd_semantic_index, cmd_semantic_nn
 from .media import cmd_media_budget, cmd_media_gate, cmd_media_imagine, cmd_media_speak, cmd_media_transcribe, cmd_record_asr, cmd_record_media_runs
+from .synthesis import cmd_explain, cmd_synthesis_budget
 from .dashboard import cmd_dashboard
 from .config import DEFAULT_MAX_DIFF_CHARS, EXIT_OK, VERSION
 from .judgment import PROVIDER_CHOICES
@@ -441,6 +442,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--budget-seconds", type=float, default=None, help="Next-day media-seconds budget (flag when the estimate exceeds it)")
     sp.add_argument("--json", action="store_true", help="One JSON object per line on stdout")
     sp.set_defaults(func=cmd_media_budget)
+
+    # ── blend1 synthesis lane (batch commands only, eval-only) ──
+
+    sp = sub.add_parser("explain",
+                        help="EVAL-ONLY: explain a gate verdict through the synthesis lane (batch-only; --dry-run spends nothing)")
+    sp.add_argument("--artifact", required=True,
+                    help="The exact input the gate judged (diff, plan file); its sha256 must match the row's input_sha256")
+    selector = sp.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--row", default=None,
+                          help="Gate row selector: the row's input_sha256 (prefix or full digest)")
+    selector.add_argument("--last-failed", dest="last_failed", action="store_true",
+                          help="Gate row selector: the most recent row with a failed/inconclusive verdict")
+    selector.add_argument("--date", default=None,
+                          help="Gate row selector: every distinct gate artifact logged on YYYY-MM-DD (UTC)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Resolve the row(s) and hash the artifact only — no ask, no row, no file")
+    sp.set_defaults(func=cmd_explain)
+
+    sp = sub.add_parser("synthesis-budget",
+                        help="EVAL-ONLY: blend1_raw ask counts + estimated spend from the event log (prints JSON)")
+    sp.set_defaults(func=cmd_synthesis_budget)
 
     # config
     sp = sub.add_parser("config", help="Show effective config")

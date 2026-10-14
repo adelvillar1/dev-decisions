@@ -25,11 +25,13 @@ Covers the pieces the grading session proved load-bearing:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
@@ -1841,6 +1843,486 @@ class TestGen1Lane(unittest.TestCase):
                     json.loads(line)  # every line parses, or this raises
         finally:
             med.media_transcribe = real
+
+
+# ── blend1 synthesis lane (2026-10-14 plan: explain-the-gate) ───────────────
+
+
+class TestBlend1Lane(unittest.TestCase):
+    """Fixture-backed tests for the blend1 synthesis lane (the explain loop).
+
+    All offline: no synthesis ask is ever made against the real lane —
+    blend1 is stubbed in sys.modules with a deterministic, counted ask().
+    The tests pin the artifact-hash gate (a match explains and writes the
+    file + row; a mismatch refuses by name with no ask and no row), the
+    fail-open install message, the exact explain-row shape (the explanation
+    text never rides in the row), the eval-only proof (the lane's only
+    logged op is "explain"; it never references a verdict or a block), the
+    hook-path isolation rule (C8's pattern: hooks never reference the lane,
+    only synthesis imports blend1, and that import is function-scoped), the
+    budget aggregation over fixture rows, and --dry-run's zero-ask contract.
+    """
+
+    def setUp(self):
+        import sys as _sys
+        import tempfile
+        from types import ModuleType
+
+        self._tmp = tempfile.TemporaryDirectory()
+        td = Path(self._tmp.name)
+        scripts = str(_HERE.parent)
+        if scripts not in _sys.path:
+            _sys.path.insert(0, scripts)
+        import devdec.config as _cfg
+        import devdec.synthesis as _syn
+
+        self._saved = (_cfg.LOG_DIR, _syn.LOG_DIR, _syn.EXPLANATIONS_DIR)
+        _cfg.LOG_DIR = td / "logs"
+        _syn.LOG_DIR = td / "logs"
+        _syn.EXPLANATIONS_DIR = td / "logs" / "feedback" / "explanations"
+        self._syn = _syn
+        for _name in (
+            "explain_gate_row", "synthesis_budget", "cmd_explain",
+            "cmd_synthesis_budget", "BLEND1_RAW_TAG", "EXPLANATIONS_DIR",
+            "GATE_OPS", "PASS_VERDICTS", "_sha_matches", "_select_gate_rows",
+            "_iter_event_rows", "_explain_prompt",
+            "EXIT_OK", "EXIT_ERROR",
+        ):
+            setattr(dd, _name, getattr(_syn, _name))
+        self._td = td
+
+        # the blend1 stub: one module, one deterministic ask, counted
+        self.ask_calls: list[dict] = []
+        stub = ModuleType("blend1")
+
+        def _ask(prompt, **kw):
+            self.ask_calls.append({"prompt": prompt, "kw": kw})
+            return {
+                "status": "ok",
+                "path": "synthesized",
+                "generated": {"status": "ok", "text": "stub explanation",
+                              "cost_usd": 0.001},
+                "validation": {"outcome": "passed", "answers_the_question": 0.9,
+                               "contradicts_facts": 0.1, "number_check": "ok"},
+                "route": {"needs_generation": 0.9, "needs_live_facts": 0.0,
+                          "answer_shape": "synthesized"},
+                "final_answer": "stub explanation",
+                "escalated": False,
+                "total_latency_ms": 100,
+            }
+
+        stub.__dict__["ask"] = _ask   # ruff B010: __dict__ assignment, not setattr
+        self._stub = stub
+        self._modpatch = unittest.mock.patch.dict(_sys.modules, {"blend1": stub})
+        self._modpatch.start()
+        self.addCleanup(self._modpatch.stop)
+
+    def tearDown(self):
+        import devdec.config as _cfg
+
+        (_cfg.LOG_DIR, self._syn.LOG_DIR, self._syn.EXPLANATIONS_DIR) = self._saved
+        self._tmp.cleanup()
+
+    # ── fixtures ────────────────────────────────────────────────────────────
+
+    def _artifact(self, name="plan.md", text="# Plan: x\ncriterion text\n"):
+        p = self._td / name
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def _sha16(self, path) -> str:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+    def _gate_row(self, sha, **kw):
+        row = {"op": "media-gate", "task": "media_gate", "provider": "gen1_raw/stepfun",
+               "input_sha256": sha, "verdict": "pass", "escalated": False,
+               "ts": "2026-10-14T12:00:00+00:00"}
+        row.update(kw)
+        return row
+
+    def _write_gate_row(self, row: dict, day="2026/10/14"):
+        d = self._td / "logs" / day
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "events.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def _events(self):
+        rows = []
+        for f in sorted((self._td / "logs").glob("20*/*/*/events.jsonl")):
+            for line in f.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+        return rows
+
+    def _gns(self, **kw):
+        import argparse
+        base = dict(artifact=None, row=None, last_failed=False, date=None, dry_run=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    # ── AC1: matching hash → file written + row appended, exact shape ───────
+
+    def test_explain_matching_hash_writes_file_and_row(self):
+        import contextlib
+        import io
+
+        art = self._artifact()
+        sha = self._sha16(art)
+        self._write_gate_row(self._gate_row(sha))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self._syn.cmd_explain(self._gns(artifact=str(art), row=sha))
+        self.assertEqual(rc, self._syn.EXIT_OK)
+
+        # the explanation file landed, text inside
+        exp = self._syn.EXPLANATIONS_DIR / f"{sha}.md"
+        self.assertTrue(exp.is_file())
+        self.assertEqual(exp.read_text(encoding="utf-8"), "stub explanation")
+
+        # exactly one explain row, the exact shape, no text in the row
+        rows = [r for r in self._events() if r.get("op") == "explain"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(set(row) - {"ts"}, {
+            "op", "input_sha256", "explained_op", "provider", "providers_used",
+            "route", "validation", "explanation_sha256", "explanation_chars",
+            "cost_usd", "latency_ms"})
+        self.assertEqual(row["input_sha256"], sha)
+        self.assertEqual(row["explained_op"], "media-gate")
+        self.assertEqual(row["provider"], "blend1")
+        self.assertEqual(row["providers_used"], ["gen1_raw/stepfun", "blend1_raw"])
+        self.assertEqual(row["route"], {"needs_generation": 0.9, "needs_live_facts": 0.0,
+                                        "answer_shape": "synthesized"})
+        self.assertEqual(row["validation"], {"outcome": "passed",
+                                             "answers_the_question": 0.9,
+                                             "contradicts_facts": 0.1,
+                                             "number_check": "ok"})
+        self.assertEqual(row["explanation_sha256"],
+                         hashlib.sha256(b"stub explanation").hexdigest()[:16])
+        self.assertEqual(row["explanation_chars"], len("stub explanation"))
+        self.assertEqual(row["cost_usd"], 0.001)
+        self.assertEqual(row["latency_ms"], 100)
+        self.assertNotIn("stub explanation", json.dumps(row))  # redaction holds
+
+        # the ask saw the verdict fields + artifact content, never live=True
+        self.assertEqual(len(self.ask_calls), 1)
+        prompt = self.ask_calls[0]["prompt"]
+        self.assertIn("GATE OP: media-gate", prompt)
+        self.assertIn("VERDICT: pass", prompt)
+        self.assertIn("PROVIDERS: gen1_raw/stepfun", prompt)
+        self.assertIn("criterion text", prompt)
+        self.assertNotIn("live", self.ask_calls[0]["kw"])
+
+        # the explanation + its path were printed
+        self.assertIn("stub explanation", out.getvalue())
+        self.assertIn(str(exp), out.getvalue())
+
+    def test_explain_gate_row_accepts_a_full_digest_row(self):
+        art = self._artifact()
+        full = hashlib.sha256(art.read_bytes()).hexdigest()
+        out_row = self._syn.explain_gate_row(self._gate_row(full), str(art))
+        self.assertEqual(out_row["op"], "explain")
+        self.assertEqual(out_row["input_sha256"], full)
+        self.assertTrue((self._syn.EXPLANATIONS_DIR / f"{full}.md").is_file())
+
+    # ── AC2: hash mismatch → named refusal, no ask, no row ──────────────────
+
+    def test_hash_mismatch_refuses_with_no_ask_and_no_row(self):
+        import contextlib
+        import io
+
+        art = self._artifact()
+        drifted = self._artifact(name="drifted.md", text="# drifted content\n")
+        sha = self._sha16(drifted)   # the row hashes the OTHER file
+        self._write_gate_row(self._gate_row(sha))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self._syn.cmd_explain(self._gns(artifact=str(art), row=sha))
+        self.assertEqual(rc, self._syn.EXIT_ERROR)
+        self.assertEqual(self.ask_calls, [])                       # no ask
+        self.assertEqual([r for r in self._events() if r.get("op") == "explain"], [])
+        self.assertFalse((self._syn.EXPLANATIONS_DIR / f"{sha}.md").exists())  # no file
+        self.assertIn("refusing to explain a drifted artifact", err.getvalue())
+        self.assertIn(str(art), err.getvalue())
+
+    def test_dry_run_hash_mismatch_also_refuses(self):
+        import contextlib
+        import io
+
+        art = self._artifact()
+        drifted = self._artifact(name="drifted.md", text="# drifted content\n")
+        sha = self._sha16(drifted)
+        self._write_gate_row(self._gate_row(sha))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self._syn.cmd_explain(self._gns(artifact=str(art), row=sha, dry_run=True))
+        self.assertEqual(rc, self._syn.EXIT_ERROR)
+        self.assertEqual(self.ask_calls, [])
+        self.assertIn("refusing to explain a drifted artifact", err.getvalue())
+
+    def test_row_selector_miss_is_named(self):
+        import contextlib
+        import io
+
+        art = self._artifact()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self._syn.cmd_explain(self._gns(artifact=str(art), row="deadbeef"))
+        self.assertEqual(rc, self._syn.EXIT_ERROR)
+        self.assertIn("no gate row matches --row deadbeef", err.getvalue())
+        self.assertEqual(self.ask_calls, [])
+
+    def test_missing_artifact_is_a_named_refusal(self):
+        import contextlib
+        import io
+
+        self._write_gate_row(self._gate_row("a" * 16))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self._syn.cmd_explain(self._gns(artifact=str(self._td / "nope.md"),
+                                                 row="a" * 16))
+        self.assertEqual(rc, self._syn.EXIT_ERROR)
+        self.assertIn("--artifact not found", err.getvalue())
+
+    # ── AC3: missing blend1 → fail-open naming the install ──────────────────
+
+    def test_missing_blend1_fails_open_naming_the_install(self):
+        import sys as _sys
+
+        art = self._artifact()
+        sha = self._sha16(art)
+        with unittest.mock.patch.dict(_sys.modules, {"blend1": None}):
+            out = self._syn.explain_gate_row(self._gate_row(sha), str(art))
+        self.assertEqual(out.get("status"), "error")
+        self.assertIn("pip install -e ~/Projects/blend1", out.get("error", ""))
+        self.assertEqual(self.ask_calls, [])
+        self.assertFalse((self._syn.EXPLANATIONS_DIR / f"{sha}.md").exists())
+
+    def test_explain_gate_row_never_raises_on_garbage(self):
+        out = self._syn.explain_gate_row({}, "")
+        self.assertEqual(out.get("status"), "error")   # no input_sha256 → named
+        out2 = self._syn.explain_gate_row({"input_sha256": "a" * 16},
+                                          str(self._td / "missing.md"))
+        self.assertEqual(out2.get("status"), "error")
+        self.assertIn("unreadable", out2.get("error", ""))
+
+    # ── AC4: eval-only — no verdict-applying or blocking path ───────────────
+
+    def test_explanation_cannot_apply_or_block_a_verdict(self):
+        import ast
+
+        syn = self._syn
+        src = Path(syn.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        # (1) the module logs exactly one row — the explain row
+        # explain_gate_row built, passed positionally — and no log_record
+        # call anywhere carries an op= override, so the lane cannot emit a
+        # verdict row for any gate op
+        log_calls = [n for n in ast.walk(tree)
+                     if isinstance(n, ast.Call)
+                     and (getattr(n.func, "id", None)
+                          or getattr(n.func, "attr", None)) == "log_record"]
+        self.assertEqual(len(log_calls), 1)
+        self.assertEqual(len(log_calls[0].args), 1)   # the row, positionally
+        self.assertEqual(log_calls[0].keywords, [])   # never an op= override
+        # every "op" literal in the module is a lane op, never a gate op:
+        # "explain" is the logged row, "synthesis-budget" the printed report
+        op_literals = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if (isinstance(k, ast.Constant) and k.value == "op"
+                            and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                        op_literals.add(v.value)
+        self.assertEqual(op_literals, {"explain", "synthesis-budget"})
+        self.assertFalse(op_literals & self._syn.GATE_OPS)
+        # the lane never writes the event log directly either
+        self.assertNotIn("events.jsonl", src)
+        # (2) no block exit anywhere in the lane
+        self.assertNotIn("EXIT_BLOCK", src)
+        # (3) an explain row carries none of the keys a verdict row carries
+        art = self._artifact()
+        sha = self._sha16(art)
+        row = self._syn.explain_gate_row(self._gate_row(sha), str(art))
+        for key in ("verdict", "label", "actual", "predicted", "heads", "answers"):
+            self.assertNotIn(key, row)
+        self.assertNotIn(row["op"], self._syn.GATE_OPS)
+
+    # ── AC5: socket guard — hooks never reach the lane ──────────────────────
+
+    def test_hook_paths_never_reference_the_synthesis_lane(self):
+        import argparse
+        import ast
+        import contextlib
+        import inspect
+        import io
+        import socket
+        import sys
+        import devdec
+        import devdec.workflow as wf
+
+        # the sync hook entrypoints never name the lane or its verb
+        for fn in (wf.cmd_scan_staged, wf.cmd_classify_diff, wf.cmd_zcode_gate):
+            src = inspect.getsource(fn).lower()
+            self.assertNotIn("blend1", src, fn.__name__)
+            self.assertNotIn("synthesis", src, fn.__name__)
+            self.assertNotIn("explain", src, fn.__name__)
+
+        # only the synthesis module imports blend1 across the package ...
+        pkg_dir = Path(devdec.__file__).resolve().parent
+        importers = [py.name for py in sorted(pkg_dir.glob("*.py"))
+                     if re.search(r"^\s*(import blend1|from blend1)",
+                                  py.read_text(encoding="utf-8"), re.M)]
+        self.assertEqual(importers, ["synthesis.py"])
+        # ... and inside it the import is function-scoped (lazy, inside
+        # _blend1) — importing the package never pulls the sibling
+        tree = ast.parse(Path(self._syn.__file__).read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_blend1")
+        imports = [n for n in ast.walk(tree) if isinstance(n, ast.Import)
+                   and any(a.name == "blend1" for a in n.names)]
+        self.assertEqual(len(imports), 1)
+        end = fn.end_lineno or fn.lineno
+        self.assertTrue(fn.lineno <= imports[0].lineno <= end)
+
+        # the hook entry runs clean under a no-network guard
+        def _no_network(*a, **k):
+            raise AssertionError("network call attempted in the hook path")
+
+        real_sock, real_stdin = socket.socket, sys.stdin
+        socket.socket = _no_network
+        try:
+            sys.stdin = io.StringIO(json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo gated-but-clean"},
+                "cwd": str(self._td),
+            }))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = wf.cmd_zcode_gate(argparse.Namespace())
+            self.assertEqual(rc, wf.EXIT_OK)   # clean command, no socket
+        finally:
+            socket.socket = real_sock
+            sys.stdin = real_stdin
+
+    # ── AC6: budget aggregation over fixture rows ───────────────────────────
+
+    def test_synthesis_budget_aggregates_blend1_raw_rows(self):
+        rows = [
+            {"op": "explain", "input_sha256": "a" * 16, "explained_op": "media-gate",
+             "providers_used": ["gen1_raw/stepfun", "blend1_raw"], "cost_usd": 0.001,
+             "ts": "2026-10-14T10:00:00+00:00"},
+            {"op": "explain", "input_sha256": "b" * 16, "explained_op": "plan-gate",
+             "providers_used": ["jev", "blend1_raw"], "cost_usd": None,
+             "ts": "2026-10-14T11:00:00+00:00"},
+            {"op": "explain", "input_sha256": "c" * 16, "explained_op": "media-gate",
+             "providers_used": ["gen1_raw/stepfun", "blend1_raw"], "cost_usd": 0.0005,
+             "ts": "2026-10-14T12:00:00+00:00"},
+            {"op": "plan-gate", "input_sha256": "d" * 16, "verdict": "gaps",
+             "providers_used": ["jev"], "ts": "2026-10-14T13:00:00+00:00"},
+        ]
+        for r in rows:
+            self._write_gate_row(r)
+        report = self._syn.synthesis_budget()
+        self.assertEqual(report["asks"], 3)
+        self.assertAlmostEqual(report["cost_usd_total"], 0.0015, places=6)
+        self.assertEqual(report["rows_with_cost"], 2)
+        self.assertEqual(report["rows_missing_cost"], 1)   # direct-path ask: no cost field
+        self.assertEqual(report["by_op"]["explain"]["asks"], 3)
+        self.assertEqual(report["first_ts"], "2026-10-14T10:00:00+00:00")
+        self.assertEqual(report["last_ts"], "2026-10-14T12:00:00+00:00")
+        self.assertEqual(report["verdict"], "ok")
+        self.assertEqual(report["tag"], "blend1_raw")
+
+    def test_synthesis_budget_no_rows_is_no_data(self):
+        report = self._syn.synthesis_budget()
+        self.assertEqual(report["asks"], 0)
+        self.assertEqual(report["verdict"], "no-data")
+        self.assertTrue(report["ok"])
+        self.assertIsNone(report["first_ts"])
+        self.assertIsNone(report["last_ts"])
+
+    def test_cmd_synthesis_budget_prints_json(self):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self._syn.cmd_synthesis_budget(self._gns())
+        self.assertEqual(rc, self._syn.EXIT_OK)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["op"], "synthesis-budget")
+
+    # ── dry-run: resolve + hash, zero asks ──────────────────────────────────
+
+    def test_dry_run_resolves_and_hashes_without_asking(self):
+        import contextlib
+        import io
+
+        art = self._artifact()
+        sha = self._sha16(art)
+        self._write_gate_row(self._gate_row(sha))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self._syn.cmd_explain(self._gns(artifact=str(art), row=sha, dry_run=True))
+        self.assertEqual(rc, self._syn.EXIT_OK)
+        self.assertEqual(self.ask_calls, [])                       # the stub was never called
+        self.assertEqual([r for r in self._events() if r.get("op") == "explain"], [])
+        self.assertFalse((self._syn.EXPLANATIONS_DIR / f"{sha}.md").exists())
+        self.assertIn("dry run", out.getvalue())
+        self.assertIn("matches the row", out.getvalue())
+
+    # ── selectors + prompt shape ────────────────────────────────────────────
+
+    def test_last_failed_picks_the_most_recent_failed_row(self):
+        art = self._artifact()
+        sha = self._sha16(art)
+        self._write_gate_row(self._gate_row(sha, verdict="pass",
+                                            ts="2026-10-14T10:00:00+00:00"))
+        self._write_gate_row(self._gate_row(sha, verdict="gaps",
+                                            ts="2026-10-14T11:00:00+00:00"))
+        selected, err = self._syn._select_gate_rows(
+            list(self._syn._iter_event_rows()), last_failed=True)
+        self.assertIsNone(err)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0][1]["verdict"], "gaps")
+
+    def test_date_selector_dedupes_by_artifact_freshest_row_wins(self):
+        art = self._artifact()
+        sha = self._sha16(art)
+        self._write_gate_row(self._gate_row(sha, ts="2026-10-14T10:00:00+00:00"))
+        self._write_gate_row(self._gate_row(sha, verdict="gaps",
+                                            ts="2026-10-14T11:00:00+00:00"))
+        selected, err = self._syn._select_gate_rows(
+            list(self._syn._iter_event_rows()), date="2026-10-14")
+        self.assertIsNone(err)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0][1]["verdict"], "gaps")
+
+    def test_date_selector_miss_is_named(self):
+        selected, err = self._syn._select_gate_rows([], date="2026-10-14")
+        self.assertEqual(selected, [])
+        self.assertIsNotNone(err)
+        self.assertIn("no gate rows logged on 2026-10-14", err or "")
+
+    def test_explain_prompt_carries_verdict_fields_and_artifact(self):
+        row = self._gate_row("a" * 16, providers_used=["jev"])
+        prompt = self._syn._explain_prompt(row, "artifact body text")
+        self.assertIn("GATE OP: media-gate", prompt)
+        self.assertIn("VERDICT: pass", prompt)
+        self.assertIn("PROVIDERS: jev", prompt)
+        self.assertIn("artifact body text", prompt)
+
+    def test_sha_matches_prefix_conventions(self):
+        syn = self._syn
+        self.assertTrue(syn._sha_matches("883166ae34115800", "883166ae34115800"))
+        self.assertTrue(syn._sha_matches("883166ae34115800", "883166ae"))   # shorter prefix
+        full = "883166ae34115800" + "f" * 48
+        self.assertTrue(syn._sha_matches("883166ae34115800", full))         # full digest
+        self.assertFalse(syn._sha_matches("883166ae34115800", "deadbeef"))
+        self.assertFalse(syn._sha_matches("", "x"))
 
 
 if __name__ == "__main__":

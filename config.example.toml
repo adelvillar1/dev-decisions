@@ -76,3 +76,15 @@ advisory_only = true   # true = warn+proceed; false = block
 # so production metrics can filter it until record-asr earns floors, and
 # media-gate stays advisory (WARN on gaps, never BLOCK) for the same reason.
 
+# Synthesis lane (blend1: explain-the-gate) — batch commands only, eval-only
+# until calibrated. The library is installed into the ambient python
+# (`pip install -e ~/Projects/blend1`; the `web` extra is optional — gate
+# explanations route direct). No keys are read from this file; blend1 reads
+# its own key homes. Batch-only rule: no synthesis command may run an ask
+# inside a synchronous hook path — hooks never reference this lane. Every
+# explain row is tagged providers_used=[..., "blend1_raw"] so production
+# metrics can filter it until calibration floors exist, and the explanation
+# text never enters the JSONL — it lands at
+# ~/.local/share/dev-decisions/logs/feedback/explanations/<input_sha256>.md
+# (the row carries explanation_sha256 + explanation_chars, never the text).
+

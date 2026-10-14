@@ -33,6 +33,7 @@ Shared JSONL log at `~/.local/share/dev-decisions/logs/YYYY/MM/DD/events.jsonl` 
 | Tabular decisions (batch lane) | **TabPFN-3.5 hosted** (Prior Labs, via the sdm1 library) | Calibrated classification, quantile forecasts, and anomaly bands over tables — run histories, benchmark series, the calibration stores. Batch-only: ~minutes-scale small tasks, never in a hook path |
 | Semantic embeddings (batch lane) | **EmbeddingGemma-2 local** (native llama-server + sentence-transformers, via the sem1 library) | Geometry over the graded history — near-dupe recovery, nearest graded neighbors, gate shortlists. Eval-only (`sem1_raw`), batch-only, never in a hook path |
 | Media generation (batch lane) | **gen1 providers** (qwen → stepfun → kokoro speech cascade, stepfun ASR, wan images — via the gen1 library) | Renders what the work needs heard and seen, then verifies the round trip: script-vs-transcript agreement, ASR accuracy, recorded usage. Eval-only (`gen1_raw`), batch-only, never in a hook path |
+| Synthesis / explanations (batch lane) | **blend1** (Liquid d1 router → fact lanes → LFM2.5-24B synthesis → GLiDE validation gate — via the blend1 library) | Composes the answer every verdict lacks: a validated explanation of what a gate verdict means and what the author should change, keyed by `input_sha256`. Eval-only (`blend1_raw`), batch-only, never in a hook path |
 
 ### Candidate models (opt-in, via sys1 flags)
 
@@ -238,6 +239,32 @@ lane (socket-guard test).
 | `record-asr` | Grade the pinned fixture round-trip with the gate's own comparator; per-provider accuracy rows the `calibration` command already joins | feedback store |
 | `record-media-runs` | gen1's telemetry JSONL → `tables/media_runs.csv` — one row per attempt including failed legs, occurrence-keyed so re-runs land nothing twice, corrupt lines skipped by name | the telemetry sink |
 | `media-budget` | sdm1 forecast band over recorded audio-seconds per provider vs a requested budget; sdm1 unavailable degrades to recorded stats with a named reason, never a fabricated band | the recorded table |
+
+## Synthesis lane (blend1)
+
+The fifth model class: sys1 judges what the work **says**, the tabular lane
+scores what the work **measures**, the semantic lane indexes what the work
+**looks like**, the media lane renders what the work needs **heard and
+seen**, and the synthesis lane **composes the answer** — every
+verdict-emitting gate gains a second beat: a synthesized, validated
+explanation of what the verdict means and what the author should change. It
+runs on the [blend1](https://github.com/adelvillar1/blend1) library (one
+`ask()`: d1 route gate → parallel fact lanes → LFM2.5-24B synthesis → GLiDE
+validation gate; facts are givens, never invented).
+
+**Operating rule: blend1 proposes prose, the gate disposes.** Everything
+here is EVAL-ONLY (rows tagged `blend1_raw` in `providers_used`) — an
+explanation is not calibrated and joins nothing; the gate's verdict stands
+exactly as recorded. **Artifact integrity**: `explain` takes `--artifact`,
+the same input the gate judged, and refuses by name when its sha256 does not
+match the row's `input_sha256` — explaining a drifted artifact is worse than
+not explaining. **Batch-only rule** as in the other lanes: no hook path
+references this lane (socket-guard test).
+
+| Command | What it does | Evidence source |
+|---|---|---|
+| `explain --artifact PATH (--row SHA \| --last-failed \| --date YYYY-MM-DD) [--dry-run]` | Resolve a gate row, hash the artifact against the row, ask blend1 for a validated explanation; text lands at `logs/feedback/explanations/<sha>.md` (never in the JSONL), the row carries hashes, counts, route/gate telemetry. `--dry-run` resolves and hashes only — no ask, no row, no file | the event log + the explanation file |
+| `synthesis-budget` | Ask counts + estimated spend from the `blend1_raw` rows, per-op breakdown, first/last ts — prints JSON | the event log |
 
 ## UX corpus (ux-surface + ux-gate)
 
