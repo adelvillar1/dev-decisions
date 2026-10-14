@@ -2096,7 +2096,10 @@ class TestBlend1Lane(unittest.TestCase):
         with unittest.mock.patch.dict(_sys.modules, {"blend1": None}):
             out = self._syn.explain_gate_row(self._gate_row(sha), str(art))
         self.assertEqual(out.get("status"), "error")
-        self.assertIn("pip install -e ~/Projects/blend1", out.get("error", ""))
+        # the hint names the WORKING path (a bare pip install -e cannot
+        # resolve the sys1/sem1/sdm1 path deps on this box)
+        self.assertIn("uv sync", out.get("error", ""))
+        self.assertIn(".venv/bin/python", out.get("error", ""))
         self.assertEqual(self.ask_calls, [])
         self.assertFalse((self._syn.EXPLANATIONS_DIR / f"{sha}.md").exists())
 
