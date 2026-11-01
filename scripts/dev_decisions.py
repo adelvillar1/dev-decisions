@@ -2720,11 +2720,8 @@ def cmd_pr_gate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-_PLAN_GATE_MAX_CRITERIA = 12
-_PLAN_GATE_MAX_SECTIONS = 14
 _PLAN_GATE_MAX_TEST_FILES = 20
 _PLAN_GATE_TESTS_PER_FILE = 12
-_EVIDENCE_GATE_MAX_CRITERIA = 12
 # Evidence bundles are the long-input case: full logs, not tails. Drex capacity
 # governs the state bound; smaller-window wires (jev fallback) truncate to
 # their own bounds internally.
@@ -2734,7 +2731,6 @@ _DOCS_GATE_MAX_ARTIFACTS = 8
 _DOCS_GATE_MAX_SECTIONS = 16
 _DOCS_GATE_SECTION_CHARS = 2000
 _DOCS_GATE_MAX_STALE = 8
-_ARCH_GATE_MAX_CLAIMS = 12
 _ARCH_GATE_DOC_SECTIONS = 20
 _ARCH_GATE_DOC_SECTION_CHARS = 2000
 _ARCH_GATE_CLAIM_CHARS = 300
@@ -2868,10 +2864,8 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     cfg = load_config(None)
     provider = getattr(args, "provider", None) or cfg["classify"]["provider"]
 
-    overflow = criteria[_PLAN_GATE_MAX_CRITERIA:]
-    criteria = criteria[:_PLAN_GATE_MAX_CRITERIA]
     all_sections = _parse_plan_sections(text)
-    sections = [(h, b) for h, b in all_sections if not any(k in h.lower() for k in _PLAN_GATE_SKIP_SECTIONS)][:_PLAN_GATE_MAX_SECTIONS]
+    sections = [(h, b) for h, b in all_sections if not any(k in h.lower() for k in _PLAN_GATE_SKIP_SECTIONS)]
 
     # Test inventory (mechanical collection; sys1 only does the semantic matching)
     test_root = getattr(args, "tests", None)
@@ -2937,8 +2931,6 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
         parts.append(f"TEST INVENTORY — {len(test_files)} test files (ids tf0..tf{len(test_files) - 1}):")
         for j, (rel, ts) in enumerate(test_files):
             parts.append(f"tf{j} = {rel} ({len(ts)} tests): {', '.join(ts[:_PLAN_GATE_TESTS_PER_FILE])}{'…' if len(ts) > _PLAN_GATE_TESTS_PER_FILE else ''}")
-    if overflow:
-        parts.append("Criteria beyond the head limit have no heads; context only: " + " | ".join(overflow))
     state = "\n\n".join(parts)[: cfg["scan"]["max_diff_chars"]]
 
     task = sys1.types.Task(id="plan_gate", heads=heads, description="Plan vs acceptance-criteria coverage gate (speculative fan-out)")
@@ -2995,9 +2987,6 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
             else:
                 untested.append(i)
                 print(f"    [UNTESTED]    C{i}  {c[:100]}")
-    if overflow:
-        print(f"  (no heads for {len(overflow)} more criteria)")
-
     gaps = bool(missing or unverifiable or creep or untested)
     log_record({
         "op": "plan-gate",
@@ -3053,7 +3042,7 @@ def cmd_plan_surface(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     plan_text = plan_path.read_text()
-    criteria = _parse_plan_criteria(plan_text)[:_plansurface.MAX_CRITERIA]
+    criteria = _parse_plan_criteria(plan_text)
     if not criteria:
         print("error: no acceptance criteria found (checkbox lines).", file=sys.stderr)
         return EXIT_ERROR
@@ -3177,7 +3166,7 @@ def cmd_evidence_gate(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     text = plan_path.read_text()
-    criteria = _parse_plan_criteria(text)[:_EVIDENCE_GATE_MAX_CRITERIA]
+    criteria = _parse_plan_criteria(text)
     if not criteria:
         print("error: no acceptance criteria found in plan (checkbox lines).", file=sys.stderr)
         return EXIT_ERROR
@@ -3518,7 +3507,7 @@ def _arch_gate_claims(text: str) -> list[str]:
         if key not in seen:
             seen.add(key)
             out.append(c)
-    return out[:_ARCH_GATE_MAX_CLAIMS]
+    return out
 
 
 def cmd_arch_gate(args: argparse.Namespace) -> int:
