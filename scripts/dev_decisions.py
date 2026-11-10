@@ -2736,9 +2736,9 @@ _ARCH_GATE_DOC_SECTION_CHARS = 2000
 _ARCH_GATE_CLAIM_CHARS = 300
 _ARCH_GATE_VERDICTS = ("conforms", "drifts", "undocumented")
 _ARCH_GATE_META_SKIP = ("acceptance criteria", "outcome", "verification", "linked artifacts", "out of scope", "status", "context")
-_PLAN_GATE_SECTION_CHARS = 2000
+_PLAN_GATE_SECTION_CHARS = 4000
 # Meta sections carry no proposed work; scope-creep heads would false-flag them.
-_PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes")
+_PLAN_GATE_SKIP_SECTIONS = ("acceptance criteria", "outcome", "out of scope", "verification", "linked artifacts", "files to be touched", "status", "context", "notes", "decision-model check", "use cases", "risks", "dependencies")
 
 
 def _parse_plan_sections(text: str) -> list[tuple[str, str]]:
