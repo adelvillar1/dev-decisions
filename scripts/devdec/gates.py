@@ -254,12 +254,33 @@ def _parse_plan_sections(text: str) -> list[tuple[str, str]]:
 
 
 def _parse_plan_criteria(text: str) -> list[str]:
-    """Checkbox lines ('- [ ]' / '- [x]') are the acceptance criteria."""
+    """Checkbox lines under an 'Acceptance criteria' heading are the criteria.
+
+    Scoped to the heading the way Fleet's plan_check.py draws the line: a
+    plan's template-mandated '## Use cases' contracts (A..E) are checkboxes
+    too, and reading every checkbox in the document consumed them as the
+    first criteria and shifted every real criterion's id by their count, so
+    a MISSING verdict addressed to C9 named the criterion the author calls
+    C4 (D-002 / fleet KI-456). Fenced spans are skipped so a checkbox inside
+    a code block is not a criterion; splitting at '## ' keeps any '### '
+    subsections inside the acceptance-criteria body.
+    """
     out = []
-    for line in text.splitlines():
-        m = re.match(r"^\s*-\s+\[[ xX]\]\s+(.+)$", line)
-        if m:
-            out.append(m.group(1).strip())
+    parts = re.split(r"^(## .+)$", text, flags=re.M)
+    for index in range(1, len(parts) - 1, 2):
+        heading, body = parts[index], parts[index + 1]
+        if "acceptance criteria" not in heading.lower():
+            continue
+        fenced = False
+        for line in body.splitlines():
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            m = re.match(r"^\s*-\s+\[[ xX]\]\s+(.+)$", line)
+            if m:
+                out.append(m.group(1).strip())
     return out
 
 

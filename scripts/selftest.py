@@ -379,6 +379,59 @@ class TestPlanGateTruncationIsReported(unittest.TestCase):
         self.assertGreaterEqual(gates._PLAN_GATE_SECTION_CHARS, 2000)
 
 
+class TestPlanGateCriteriaAreScoped(unittest.TestCase):
+    """D-002 / fleet KI-456: criteria are the boxes under 'Acceptance
+    criteria', not every checkbox in the document. A template-mandated
+    '## Use cases' block (A..E) must not consume the first ids and shift
+    every real criterion's number, so a MISSING verdict names the criterion
+    the author actually wrote."""
+
+    def _gates(self):
+        import sys as _sys
+        _sys.path.insert(0, str(_HERE.parent))
+        from devdec import gates
+        return gates
+
+    def test_use_cases_do_not_shift_the_criterion_ids(self):
+        gates = self._gates()
+        use_cases = "\n".join(
+            f"- [ ] {letter}: a use case contract" for letter in "ABCDE")
+        criteria = "\n".join(
+            f"- [ ] C{i} — the real criterion {i}" for i in range(14))
+        plan = (
+            "# Plan\n\n## Use cases\n" + use_cases + "\n\n"
+            "## Acceptance criteria\n" + criteria + "\n\n"
+            "## Out of scope\n- [ ] not a criterion\n"
+        )
+        parsed = gates._parse_plan_criteria(plan)
+        # 14 declared criteria — not 19 (the five use cases must not count)
+        # and not 20 (the out-of-scope box is not a criterion either).
+        self.assertEqual(len(parsed), 14, parsed)
+        self.assertTrue(parsed[0].startswith("C0"), parsed[0])
+        self.assertTrue(parsed[13].startswith("C13"), parsed[13])
+        self.assertFalse(any("use case" in c for c in parsed))
+
+    def test_a_fenced_checkbox_is_not_a_criterion(self):
+        gates = self._gates()
+        plan = (
+            "## Acceptance criteria\n"
+            "- [ ] C0 — a real criterion\n"
+            "```\n- [ ] a checkbox inside a code fence\n```\n"
+            "- [x] C1 — another real criterion\n"
+        )
+        parsed = gates._parse_plan_criteria(plan)
+        self.assertEqual(len(parsed), 2, parsed)
+        self.assertTrue(parsed[0].startswith("C0"))
+        self.assertTrue(parsed[1].startswith("C1"))
+
+    def test_a_plan_without_use_cases_is_unchanged(self):
+        gates = self._gates()
+        criteria = "\n".join(f"- [ ] C{i} — criterion {i}" for i in range(12))
+        plan = "# Plan\n\n## Acceptance criteria\n" + criteria + "\n"
+        parsed = gates._parse_plan_criteria(plan)
+        self.assertEqual(len(parsed), 12, parsed)
+
+
 class TestFeedbackRowShape(unittest.TestCase):
     def test_write_feedback_adds_head_id(self):
         import tempfile
