@@ -414,8 +414,23 @@ def cmd_plan_gate(args: argparse.Namespace) -> int:
     parts = [f"A development plan with {len(criteria)} acceptance criteria (C0..C{len(criteria) - 1}) and {len(sections)} work sections (s0..s{len(sections) - 1})."]
     for i, c in enumerate(criteria):
         parts.append(f"C{i}: {c}")
+    # A section past the cap is CUT, and the cut is REPORTED: D-001 measured the
+    # gate judging half a body in silence, so a criterion-satisfying paragraph
+    # placed past the cap moved no verdict and read as ignored. The note names
+    # the section, the cap, and how much was left out, and it rides the same
+    # state the heads read — so the model is told what it is not seeing, the
+    # report can quote it, and a reader of the run is never left guessing.
     for j, (h, b) in enumerate(sections):
-        parts.append(f"=== SECTION s{j}: {h} ===\n{b[:_PLAN_GATE_SECTION_CHARS]}")
+        if len(b) > _PLAN_GATE_SECTION_CHARS:
+            parts.append(
+                f"=== SECTION s{j}: {h} === [TRUNCATED: this section is {len(b)} chars; "
+                f"the first {_PLAN_GATE_SECTION_CHARS} are given below and the last "
+                f"{len(b) - _PLAN_GATE_SECTION_CHARS} are NOT shown. A criterion's "
+                f"evidence past char {_PLAN_GATE_SECTION_CHARS} is invisible to you — "
+                f"say so rather than reporting it missing.]\n{b[:_PLAN_GATE_SECTION_CHARS]}"
+            )
+        else:
+            parts.append(f"=== SECTION s{j}: {h} ===\n{b}")
     if test_files:
         parts.append(f"TEST INVENTORY — {len(test_files)} test files (ids tf0..tf{len(test_files) - 1}):")
         for j, (rel, ts) in enumerate(test_files):

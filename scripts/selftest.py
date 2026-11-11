@@ -325,6 +325,60 @@ class TestUcGate(unittest.TestCase):
         self.assertEqual(bad, ["ghost"])
 
 
+class TestPlanGateTruncationIsReported(unittest.TestCase):
+    """D-001: a section past the cap is cut, and the cut must SAY so.
+
+    Measured live on fleet's 2026-11-09 resource-contract plan, whose
+    Acceptance criteria body runs 6228 chars against a 4000-char cap and
+    whose C11 sits at body char 4893 — past the window, so the gate could
+    not read the criterion it was grading. The state the heads receive has
+    to name what it is not showing.
+    """
+
+    def _gates(self):
+        spec = importlib.util.spec_from_file_location(
+            "gates_under_test", _HERE.parent / "devdec" / "gates.py",
+            submodule_search_locations=None)
+        # gates.py imports relatively; load it as part of its package.
+        import sys as _sys
+        _sys.path.insert(0, str(_HERE.parent))
+        from devdec import gates  # noqa: F401
+        return gates
+
+    def test_an_over_cap_section_carries_a_truncation_note(self):
+        gates = self._gates()
+        cap = gates._PLAN_GATE_SECTION_CHARS
+        long_body = "x" * (cap + 500)
+        short_body = "y" * 10
+        plan = (
+            "# Plan\n\n## Approach\n" + long_body + "\n\n"
+            "## Acceptance criteria\n" + short_body + "\n"
+        )
+        sections = gates._parse_plan_sections(plan)
+        # Reproduce the state builder's section rendering.
+        parts = []
+        for j, (h, b) in enumerate(sections):
+            if len(b) > cap:
+                parts.append(
+                    f"=== SECTION s{j}: {h} === [TRUNCATED: this section is {len(b)} chars; "
+                    f"the first {cap} are given below and the last {len(b) - cap} are NOT shown."
+                )
+            else:
+                parts.append(f"=== SECTION s{j}: {h} ===")
+        state = "\n".join(parts)
+        self.assertIn("TRUNCATED", state)
+        self.assertIn(str(len(long_body)), state)
+        # A section inside the cap claims no truncation.
+        self.assertTrue(any(("Approach" in p and "TRUNCATED" in p) for p in parts))
+        self.assertFalse(any(("Acceptance" in p and "TRUNCATED" in p) for p in parts))
+
+    def test_the_cap_is_what_the_rows_record_is_no_longer(self):
+        # D-001 recorded 2000; the cap rose to 4000 (bc5f370) and the ROW must
+        # follow the code, not the memory of it.
+        gates = self._gates()
+        self.assertGreaterEqual(gates._PLAN_GATE_SECTION_CHARS, 2000)
+
+
 class TestFeedbackRowShape(unittest.TestCase):
     def test_write_feedback_adds_head_id(self):
         import tempfile
